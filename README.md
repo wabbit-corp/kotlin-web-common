@@ -1,0 +1,14 @@
+Common requirements for the API client libraries:
+- [ ] Asynchronous Support (i.e. suspend in Kotlin or ZIO in Scala).
+- [ ] Thread Safety: Ensure the library is safe to use in multi-threaded applications.
+- [ ] Mocking Support: Facilitate testing by providing easy ways to mock API responses.
+- [ ] Resource Management: Proper management of resources like network connections.
+- [ ] Response caching.
+- [ ] Error handling should be consistent and use custom exceptions.
+- [ ] Rate limiting should be implemented.
+- [ ] Proxy support.
+- [ ] Logging.
+- [ ] Retries.
+- [ ] Cost estimation (if applicable).
+- [ ] Metrics.
+- [ ] Unit tests.
