@@ -5,7 +5,5 @@ interface ExampleApi {
 }
 
 object ExampleApiRestClient : ExampleApi {
-    override suspend fun doSomething(): String {
-        return "Hello, World!"
-    }
+    override suspend fun doSomething(): String = "Hello, World!"
 }
