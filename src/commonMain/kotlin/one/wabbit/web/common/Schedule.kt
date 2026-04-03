@@ -355,7 +355,7 @@ suspend inline fun <T, reified E : Throwable> runWithRetry(
  *
  * Returns null if the value is missing, invalid, or represents a time in the past.
  */
-private fun parseRetryAfterHeader(headerValue: String?): Duration? {
+fun parseRetryAfterHeader(headerValue: String?, now: kotlin.time.Instant = Clock.System.now()): Duration? {
     if (headerValue == null) return null
     val trimmed = headerValue.trim()
 
@@ -407,7 +407,6 @@ private fun parseRetryAfterHeader(headerValue: String?): Duration? {
         return null
     }
 
-    val now = Clock.System.now()
     val diff = targetInstant - now
     return if (diff.isNegative()) null else diff
 }
