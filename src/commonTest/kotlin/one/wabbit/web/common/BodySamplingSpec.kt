@@ -13,7 +13,7 @@ import kotlin.test.assertEquals
 
 class BodySamplingSpec {
     @Test
-    fun `consumeBodyPrefix samples the requested prefix`() {
+    fun `consumeRawBodyPrefixUtf8 samples the requested prefix`() {
         runBlocking {
             val client =
                 HttpClient(MockEngine) {
@@ -29,7 +29,7 @@ class BodySamplingSpec {
 
             try {
                 val response = client.get("https://example.test")
-                assertEquals("abc", response.consumeBodyPrefix(3))
+                assertEquals("abc", response.consumeRawBodyPrefixUtf8(3))
                 Unit
             } finally {
                 client.close()

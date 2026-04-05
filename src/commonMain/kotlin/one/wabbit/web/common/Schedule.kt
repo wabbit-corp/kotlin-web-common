@@ -8,6 +8,8 @@ import io.ktor.client.plugins.ServerResponseException
 import io.ktor.client.network.sockets.ConnectTimeoutException
 import io.ktor.client.network.sockets.SocketTimeoutException
 import kotlinx.datetime.DateTimeUnit
+import kotlinx.datetime.DayOfWeek
+import kotlinx.datetime.LocalDate
 import kotlinx.datetime.LocalDateTime
 import kotlinx.datetime.TimeZone
 import kotlinx.datetime.plus
@@ -32,33 +34,52 @@ sealed interface Schedule {
     @Serializable data object Never : Schedule
 
     /**
+     * Repeat a fixed interval forever.
+     */
+    @Serializable data class Forever(val interval: Duration) : Schedule {
+        init {
+            requireFiniteNonNegativeDuration("interval", interval)
+        }
+    }
+
+    /**
      * Repeat a fixed interval [times] times (e.g. "retry at most times times").
      */
     @Serializable data class Recurs(val times: Int, val interval: Duration) : Schedule {
         init {
             require(times >= 0) { "times must be >= 0, was $times" }
-            require(!interval.isNegative()) { "interval must be >= 0, was $interval" }
+            requireFiniteNonNegativeDuration("interval", interval)
         }
     }
 
     /**
      * Use the fixed sequence [delays]. When exhausted, stop.
      */
-    @Serializable data class Fixed(val delays: List<Duration>) : Schedule {
+    @ConsistentCopyVisibility
+    @Serializable data class Fixed private constructor(
+        val delays: List<Duration>,
+        private val copied: Boolean = true,
+    ) : Schedule {
+        constructor(delays: List<Duration>) : this(delays.toList(), true)
+
         init {
             for (d in delays) {
-                require(!d.isNegative()) { "all delays must be >= 0, was $d" }
+                requireFiniteNonNegativeDuration("delay", d)
             }
         }
     }
 
     /**
      * Infinite exponential growth: base, base*factor, base*factor^2, ...
+     *
+     * Growth stops only when composed with another schedule (for example [limited], [capped], or
+     * [cutoff]). Callers that leave it unbounded should be aware that multiplying a finite
+     * [Duration] by [factor] can eventually overflow the finite duration range.
      */
     @Serializable data class Exponential(val initialDelay: Duration, val factor: Double) : Schedule {
         init {
-            require(!initialDelay.isNegative()) { "initialDelay must be >= 0, was $initialDelay" }
-            require(factor > 0) { "factor must be > 0, was $factor" }
+            requireFiniteNonNegativeDuration("initialDelay", initialDelay)
+            requireFinitePositiveDouble("factor", factor)
         }
     }
 
@@ -82,6 +103,8 @@ sealed interface Schedule {
      */
     @Serializable data class Jittered(val schedule: Schedule, val minScaler: Double, val maxScaler: Double) : Schedule {
         init {
+            require(minScaler.isFinite()) { "minScaler must be finite, was $minScaler" }
+            require(maxScaler.isFinite()) { "maxScaler must be finite, was $maxScaler" }
             require(minScaler >= 0.0) { "minScaler must be >= 0.0, was $minScaler" }
             require(maxScaler >= minScaler) {
                 "maxScaler must be >= minScaler, was $maxScaler (min=$minScaler)"
@@ -90,17 +113,19 @@ sealed interface Schedule {
     }
 
     /**
-     * Stop once cumulative delay would exceed [duration].
+     * Stop once cumulative scheduled delay would exceed [duration].
+     *
+     * This is based on the sum of emitted delays, not wall-clock elapsed time.
      */
     @Serializable data class WithCutoff(val schedule: Schedule, val duration: Duration) : Schedule {
         init {
-            require(!duration.isNegative()) { "duration must be >= 0, was $duration" }
+            requireFiniteNonNegativeDuration("duration", duration)
         }
     }
 
     @Serializable data class CapDelay(val schedule: Schedule, val maxDelay: Duration) : Schedule {
         init {
-            require(!maxDelay.isNegative()) { "maxDelay must be >= 0, was $maxDelay" }
+            requireFiniteNonNegativeDuration("maxDelay", maxDelay)
         }
     }
 
@@ -129,6 +154,12 @@ sealed interface Schedule {
     fun capped(maxDelay: Duration): Schedule =
         Schedule.CapDelay(this, maxDelay)
 
+    /**
+     * Stop once cumulative scheduled delay would exceed [duration].
+     */
+    fun cutoff(duration: Duration): Schedule =
+        Schedule.WithCutoff(this, duration)
+
     companion object {
         fun retries(
             /** Total attempts = 1 (initial) + maxRetries. */
@@ -150,7 +181,7 @@ sealed interface Schedule {
         }
 
         fun forever(spaced: Duration): Schedule =
-            Schedule.Recurs(Int.MAX_VALUE, spaced)
+            Schedule.Forever(spaced)
 
         fun fixed(delay: Duration, times: Int): Schedule =
             Schedule.Recurs(times, delay)
@@ -197,6 +228,10 @@ fun Schedule.compile(
 
     Schedule.Never -> StatefulSchedule {
         null
+    }
+
+    is Schedule.Forever -> StatefulSchedule {
+        interval
     }
 
     is Schedule.Recurs -> {
@@ -360,8 +395,14 @@ class RetryRun<E>(
 suspend inline fun <T, reified E : Throwable> runWithRetry(
     policy: RetryPolicy<E>,
     block: suspend () -> T,
+): T = runWithRetry(policy, Random.Default, block)
+
+suspend inline fun <T, reified E : Throwable> runWithRetry(
+    policy: RetryPolicy<E>,
+    random: Random,
+    block: suspend () -> T,
 ): T {
-    val run = policy.newRun()
+    val run = policy.newRun(random)
     while (true) {
         try {
             return block()
@@ -390,14 +431,15 @@ fun parseRetryAfterHeader(headerValue: String?, now: kotlin.time.Instant = Clock
     // First try: numeric seconds (allowing non-standard fractional seconds)
     trimmed.toDoubleOrNull()?.let { secondsValue ->
         if (secondsValue.isFinite() && secondsValue >= 0.0) {
-            return secondsValue.seconds
+            val duration = secondsValue.seconds
+            if (duration.isFinite()) return duration
         }
     }
 
     val targetInstant = parseHttpDate(trimmed, now) ?: return null
 
     val diff = targetInstant - now
-    return if (diff.isNegative()) null else diff
+    return if (diff.isFinite() && !diff.isNegative()) diff else null
 }
 
 private fun parseHttpDate(value: String, now: kotlin.time.Instant): kotlin.time.Instant? =
@@ -408,7 +450,7 @@ private fun parseHttpDate(value: String, now: kotlin.time.Instant): kotlin.time.
 private fun parseImfFixdate(value: String): kotlin.time.Instant? {
     val commaIndex = value.indexOf(',')
     if (commaIndex <= 0) return null
-    if (!isShortDayName(value.substring(0, commaIndex))) return null
+    val dayOfWeek = parseShortDayName(value.substring(0, commaIndex)) ?: return null
 
     val parts = value.substring(commaIndex + 1).trim().split(httpDateWhitespace)
     if (parts.size != 5) return null
@@ -419,13 +461,13 @@ private fun parseImfFixdate(value: String): kotlin.time.Instant? {
     val time = parseHttpTime(parts[3]) ?: return null
     if (!parts[4].equals("GMT", ignoreCase = true)) return null
 
-    return toInstantOrNull(year, month, day, time)
+    return toInstantOrNull(year, month, day, time, dayOfWeek)
 }
 
 private fun parseRfc850Date(value: String, now: kotlin.time.Instant): kotlin.time.Instant? {
     val commaIndex = value.indexOf(',')
     if (commaIndex <= 0) return null
-    if (!isLongDayName(value.substring(0, commaIndex))) return null
+    val dayOfWeek = parseLongDayName(value.substring(0, commaIndex)) ?: return null
 
     val parts = value.substring(commaIndex + 1).trim().split(httpDateWhitespace)
     if (parts.size != 3) return null
@@ -442,20 +484,20 @@ private fun parseRfc850Date(value: String, now: kotlin.time.Instant): kotlin.tim
     if (!parts[2].equals("GMT", ignoreCase = true)) return null
 
     val year = resolveRfc850Year(shortYear, month, day, time, now)
-    return toInstantOrNull(year, month, day, time)
+    return toInstantOrNull(year, month, day, time, dayOfWeek)
 }
 
 private fun parseAsctimeDate(value: String): kotlin.time.Instant? {
     val parts = value.trim().split(httpDateWhitespace)
     if (parts.size != 5) return null
-    if (!isShortDayName(parts[0])) return null
+    val dayOfWeek = parseShortDayName(parts[0]) ?: return null
 
     val month = parseHttpMonth(parts[1]) ?: return null
     val day = parts[2].toIntOrNull() ?: return null
     val time = parseHttpTime(parts[3]) ?: return null
     val year = parts[4].toIntOrNull() ?: return null
 
-    return toInstantOrNull(year, month, day, time)
+    return toInstantOrNull(year, month, day, time, dayOfWeek)
 }
 
 private fun resolveRfc850Year(
@@ -509,6 +551,7 @@ private fun parseHttpTime(value: String): ParsedTime? {
     if (hour !in 0..23) return null
     if (minute !in 0..59) return null
     if (second !in 0..60) return null
+    if (second == 60 && (hour != 23 || minute != 59)) return null
 
     return ParsedTime(hour = hour, minute = minute, second = second)
 }
@@ -518,7 +561,11 @@ private fun toInstantOrNull(
     month: Int,
     day: Int,
     time: ParsedTime,
+    dayOfWeek: DayOfWeek? = null,
 ): kotlin.time.Instant? = try {
+    if (year < 1900) return null
+    val localDate = LocalDate(year, month, day)
+    if (dayOfWeek != null && localDate.dayOfWeek != dayOfWeek) return null
     val baseInstant =
         LocalDateTime(year, month, day, time.hour, time.minute, time.second.coerceAtMost(59))
             .toInstant(TimeZone.UTC)
@@ -527,11 +574,11 @@ private fun toInstantOrNull(
     null
 }
 
-private fun isShortDayName(value: String): Boolean =
-    value in shortDayNames
+private fun parseShortDayName(value: String): DayOfWeek? =
+    shortDayNames[value]
 
-private fun isLongDayName(value: String): Boolean =
-    value in longDayNames
+private fun parseLongDayName(value: String): DayOfWeek? =
+    longDayNames[value]
 
 private data class ParsedTime(
     val hour: Int,
@@ -541,12 +588,40 @@ private data class ParsedTime(
 
 private val httpDateWhitespace = Regex("\\s+")
 
-private val shortDayNames = setOf("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+private val shortDayNames = mapOf(
+    "Mon" to DayOfWeek.MONDAY,
+    "Tue" to DayOfWeek.TUESDAY,
+    "Wed" to DayOfWeek.WEDNESDAY,
+    "Thu" to DayOfWeek.THURSDAY,
+    "Fri" to DayOfWeek.FRIDAY,
+    "Sat" to DayOfWeek.SATURDAY,
+    "Sun" to DayOfWeek.SUNDAY,
+)
 
-private val longDayNames =
-    setOf("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+private val longDayNames = mapOf(
+    "Monday" to DayOfWeek.MONDAY,
+    "Tuesday" to DayOfWeek.TUESDAY,
+    "Wednesday" to DayOfWeek.WEDNESDAY,
+    "Thursday" to DayOfWeek.THURSDAY,
+    "Friday" to DayOfWeek.FRIDAY,
+    "Saturday" to DayOfWeek.SATURDAY,
+    "Sunday" to DayOfWeek.SUNDAY,
+)
 
 
+/**
+ * Default retry policy for idempotent HTTP operations.
+ *
+ * This retries selected HTTP statuses and common transport exceptions. It also retries generic
+ * [IOException] because some Ktor engines surface connection resets and similar network failures
+ * through that type. If the wrapped block can throw unrelated [IOException] values, provide a
+ * narrower custom policy instead of relying on this default.
+ *
+ * Status-based retries only apply when the wrapped HTTP call throws a Ktor response exception,
+ * which usually means `expectSuccess = true` or an installed response validator. Calls that
+ * return a normal [io.ktor.client.statement.HttpResponse] for 4xx/5xx statuses will not be
+ * retried by this policy unless the caller converts those statuses into exceptions.
+ */
 fun httpIdempotentDefaultPolicy(): RetryPolicy<Throwable> {
     val schedule =
         Schedule.retries(
@@ -612,10 +687,29 @@ fun httpIdempotentDefaultPolicy(): RetryPolicy<Throwable> {
 fun httpDefaultPolicy(): RetryPolicy<Throwable> =
     httpIdempotentDefaultPolicy()
 
+/**
+ * Run an idempotent HTTP operation with retry support.
+ *
+ * Transport exceptions are retried directly. HTTP status retries depend on the wrapped call
+ * throwing a Ktor response exception, which usually means `expectSuccess = true` or an installed
+ * response validator. Calls that return a normal response object for 4xx/5xx statuses complete
+ * normally and are not retried by this helper.
+ */
 suspend fun <T> retryingIdempotentHttpCall(
     policy: RetryPolicy<Throwable> = httpIdempotentDefaultPolicy(),
     block: suspend () -> T,
-): T = runWithRetry(policy, block)
+): T = retryingIdempotentHttpCall(policy, Random.Default, block)
+
+suspend fun <T> retryingIdempotentHttpCall(
+    random: Random,
+    block: suspend () -> T,
+): T = retryingIdempotentHttpCall(httpIdempotentDefaultPolicy(), random, block)
+
+suspend fun <T> retryingIdempotentHttpCall(
+    policy: RetryPolicy<Throwable>,
+    random: Random,
+    block: suspend () -> T,
+): T = runWithRetry(policy, random, block)
 
 @Deprecated(
     message = "This helper assumes the wrapped HTTP call is idempotent. Use retryingIdempotentHttpCall instead.",
@@ -625,3 +719,32 @@ suspend fun <T> retryingHttpCall(
     policy: RetryPolicy<Throwable> = httpIdempotentDefaultPolicy(),
     block: suspend () -> T,
 ): T = retryingIdempotentHttpCall(policy, block)
+
+@Deprecated(
+    message = "This helper assumes the wrapped HTTP call is idempotent. Use retryingIdempotentHttpCall instead.",
+    replaceWith = ReplaceWith("retryingIdempotentHttpCall(random, block)"),
+)
+suspend fun <T> retryingHttpCall(
+    random: Random,
+    block: suspend () -> T,
+): T = retryingIdempotentHttpCall(random, block)
+
+@Deprecated(
+    message = "This helper assumes the wrapped HTTP call is idempotent. Use retryingIdempotentHttpCall instead.",
+    replaceWith = ReplaceWith("retryingIdempotentHttpCall(policy, random, block)"),
+)
+suspend fun <T> retryingHttpCall(
+    policy: RetryPolicy<Throwable>,
+    random: Random,
+    block: suspend () -> T,
+): T = retryingIdempotentHttpCall(policy, random, block)
+
+private fun requireFiniteNonNegativeDuration(name: String, duration: Duration) {
+    require(duration.isFinite()) { "$name must be finite, was $duration" }
+    require(!duration.isNegative()) { "$name must be >= 0, was $duration" }
+}
+
+private fun requireFinitePositiveDouble(name: String, value: Double) {
+    require(value.isFinite()) { "$name must be finite, was $value" }
+    require(value > 0.0) { "$name must be > 0, was $value" }
+}

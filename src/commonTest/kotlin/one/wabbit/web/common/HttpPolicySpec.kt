@@ -3,6 +3,7 @@ package one.wabbit.web.common
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.mock.MockEngine
 import io.ktor.client.engine.mock.respond
+import io.ktor.client.plugins.ClientRequestException
 import io.ktor.client.plugins.expectSuccess
 import io.ktor.client.request.get
 import io.ktor.client.statement.bodyAsText
@@ -21,6 +22,44 @@ import kotlin.test.assertNotNull
 import kotlin.test.assertNull
 
 class HttpPolicySpec {
+    @Test
+    fun `retrying http helpers support legacy and explicit random overloads`() = runBlocking {
+        val policy =
+            RetryPolicy<Throwable>(
+                schedule = Schedule.fixed(kotlin.time.Duration.ZERO, 1),
+            ) { _, _ ->
+                RetryAction.Retry()
+            }
+
+        var legacyAttempts = 0
+        val legacyResult =
+            retryingIdempotentHttpCall(policy) {
+                legacyAttempts++
+                if (legacyAttempts == 1) throw IOException("transient")
+                "ok"
+            }
+
+        assertEquals("ok", legacyResult)
+
+        var explicitRandomAttempts = 0
+        val explicitRandomResult =
+            retryingIdempotentHttpCall(policy, kotlin.random.Random(1)) {
+                explicitRandomAttempts++
+                if (explicitRandomAttempts == 1) throw IOException("transient")
+                "random-ok"
+            }
+
+        assertEquals("random-ok", explicitRandomResult)
+
+        @Suppress("DEPRECATION")
+        val deprecatedResult =
+            retryingHttpCall(policy) {
+                "deprecated-ok"
+            }
+
+        assertEquals("deprecated-ok", deprecatedResult)
+    }
+
     @Test
     fun `idempotent default policy retries transient transport failures`() {
         val connectRun = httpIdempotentDefaultPolicy().newRun()
@@ -137,13 +176,46 @@ class HttpPolicySpec {
             }
 
         try {
-            assertFailsWith<Throwable> {
+            assertFailsWith<ClientRequestException> {
                 retryingIdempotentHttpCall {
                     client.get("https://example.test") {
                         expectSuccess = true
                     }.bodyAsText()
                 }
             }
+            assertEquals(1, attempts)
+        } finally {
+            client.close()
+        }
+    }
+
+    @Test
+    fun `retryingIdempotentHttpCall does not retry status responses that do not throw`() = runBlocking {
+        var attempts = 0
+        val client =
+            HttpClient(MockEngine) {
+                engine {
+                    addHandler {
+                        attempts++
+                        respond(
+                            content = "slow down",
+                            status = HttpStatusCode.TooManyRequests,
+                            headers = headersOf(
+                                HttpHeaders.ContentType to listOf(ContentType.Text.Plain.toString()),
+                                HttpHeaders.RetryAfter to listOf("0"),
+                            ),
+                        )
+                    }
+                }
+            }
+
+        try {
+            val result =
+                retryingIdempotentHttpCall {
+                    client.get("https://example.test").bodyAsText()
+                }
+
+            assertEquals("slow down", result)
             assertEquals(1, attempts)
         } finally {
             client.close()

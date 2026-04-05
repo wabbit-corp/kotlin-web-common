@@ -7,14 +7,15 @@ import kotlinx.io.Buffer
 import kotlinx.io.readByteArray
 
 /**
- * Consumes up to [maxLen] bytes from the response body channel for diagnostics.
+ * Consumes up to [maxLen] raw bytes from the response body channel for diagnostics and decodes
+ * the sampled bytes as UTF-8.
  *
- * This is byte-count based, not character-count based. The sampled bytes are decoded as UTF-8 for
- * human-readable diagnostics, and malformed byte sequences may decode with replacement
- * characters. This helper also cancels the body channel it reads from, so callers should treat
- * it as destructive and not rely on later body reads.
+ * This is byte-count based, not character-count based. Because it reads [bodyAsChannel], the
+ * sampled bytes may still be compressed or otherwise encoded depending on the active client
+ * pipeline. Malformed byte sequences may decode with replacement characters. This helper is
+ * destructive and should be treated as "sample and consume the raw body channel."
  */
-suspend fun HttpResponse.consumeBodyPrefix(maxLen: Int): String {
+suspend fun HttpResponse.consumeRawBodyPrefixUtf8(maxLen: Int): String {
     require(maxLen >= 0) { "maxLen must be non-negative, was $maxLen" }
     if (maxLen == 0) return ""
 
@@ -39,10 +40,17 @@ suspend fun HttpResponse.consumeBodyPrefix(maxLen: Int): String {
 }
 
 @Deprecated(
-    message = "This helper consumes the response body for diagnostics. Use consumeBodyPrefix instead.",
-    replaceWith = ReplaceWith("consumeBodyPrefix(maxLen)"),
+    message = "This helper consumes raw response bytes and decodes them as UTF-8. Use consumeRawBodyPrefixUtf8 instead.",
+    replaceWith = ReplaceWith("consumeRawBodyPrefixUtf8(maxLen)"),
+)
+suspend fun HttpResponse.consumeBodyPrefix(maxLen: Int): String =
+    consumeRawBodyPrefixUtf8(maxLen)
+
+@Deprecated(
+    message = "This helper consumes raw response bytes and decodes them as UTF-8. Use consumeRawBodyPrefixUtf8 instead.",
+    replaceWith = ReplaceWith("consumeRawBodyPrefixUtf8(maxLen)"),
 )
 suspend fun HttpResponse.safeBodyPrefix(maxLen: Int): String =
-    consumeBodyPrefix(maxLen)
+    consumeRawBodyPrefixUtf8(maxLen)
 
 private const val BODY_PREFIX_CHUNK_SIZE = 8192

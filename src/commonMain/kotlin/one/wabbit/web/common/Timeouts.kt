@@ -11,6 +11,11 @@ import kotlin.time.Duration.Companion.seconds
  *
  * `null` leaves the corresponding timeout unset.
  * Positive values must be finite whole-millisecond durations.
+ *
+ * These values are applied through Ktor's `HttpTimeout` request configuration and only take
+ * effect when that plugin and the current engine support the corresponding timeout type. The
+ * default `socket` timeout is tuned for request/response APIs and may be too aggressive for
+ * streaming, SSE, or long-polling workloads because it measures inactivity between packets.
  */
 data class Timeouts(
     val request: Duration? = 15.seconds,
