@@ -13,8 +13,14 @@ data class Etiquette(
         if (referer != null) {
             require(referer.isNotBlank()) { "Referer must not be blank if provided" }
         }
-        require("User-Agent" !in extraHeaders.keys) { "extraHeaders must not contain User-Agent" }
-        require("Referer" !in extraHeaders.keys) { "extraHeaders must not contain Referer" }
+        for (headerName in extraHeaders.keys) {
+            require(!headerName.equals("User-Agent", ignoreCase = true)) {
+                "extraHeaders must not contain User-Agent"
+            }
+            require(!headerName.equals("Referer", ignoreCase = true)) {
+                "extraHeaders must not contain Referer"
+            }
+        }
     }
 }
 

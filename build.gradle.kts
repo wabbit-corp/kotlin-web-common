@@ -149,6 +149,8 @@ kotlin {
             dependencies {
                 implementation("org.jetbrains.kotlin:kotlin-test:2.3.10")
 
+                implementation("io.ktor:ktor-client-mock:3.3.0")
+
             }
 
         }

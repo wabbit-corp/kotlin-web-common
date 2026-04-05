@@ -5,11 +5,17 @@ package one.wabbit.web.common
 import io.ktor.client.plugins.ClientRequestException
 import io.ktor.client.plugins.HttpRequestTimeoutException
 import io.ktor.client.plugins.ServerResponseException
+import io.ktor.client.network.sockets.ConnectTimeoutException
+import io.ktor.client.network.sockets.SocketTimeoutException
+import kotlinx.datetime.DateTimeUnit
 import kotlinx.datetime.LocalDateTime
 import kotlinx.datetime.TimeZone
+import kotlinx.datetime.plus
 import kotlinx.datetime.toInstant
+import kotlinx.datetime.toLocalDateTime
 import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.serialization.Serializable
+import kotlinx.io.IOException
 import kotlin.random.Random
 import kotlin.time.Clock
 import kotlin.time.Duration
@@ -99,12 +105,16 @@ sealed interface Schedule {
     }
 
     fun jittered(jitterFactor: Double): Schedule =
-        if (jitterFactor == 0.0) this
-        else Jittered(
-            schedule = this,
-            minScaler = 1.0 - jitterFactor,
-            maxScaler = 1.0 + jitterFactor,
-        )
+        when {
+            jitterFactor == 0.0 -> this
+            jitterFactor !in 0.0..1.0 ->
+                throw IllegalArgumentException("jitterFactor must be in [0,1], was $jitterFactor")
+            else -> Jittered(
+                schedule = this,
+                minScaler = 1.0 - jitterFactor,
+                maxScaler = 1.0 + jitterFactor,
+            )
+        }
 
     /**
      * Take at most [n] elements from this schedule.
@@ -133,8 +143,8 @@ sealed interface Schedule {
             val core =
                 Schedule.Exponential(initialDelay = baseDelay, factor = 2.0)
                     .limited(maxRetries)
-                    .capped(maxDelay)
                     .jittered(jitterFactor)
+                    .capped(maxDelay)
 
             return core
         }
@@ -152,10 +162,11 @@ sealed interface Schedule {
             maxDelay: Duration? = null,
             jitterFactor: Double = 0.0,
         ): Schedule {
+            require(jitterFactor in 0.0..1.0) { "jitterFactor must be in [0,1], was $jitterFactor" }
             var s: Schedule = Schedule.Exponential(base, factor)
             if (maxRetries != Int.MAX_VALUE) s = s.limited(maxRetries)
-            if (maxDelay != null) s = s.capped(maxDelay)
             if (jitterFactor != 0.0) s = s.jittered(jitterFactor)
+            if (maxDelay != null) s = s.capped(maxDelay)
             return s
         }
     }
@@ -295,8 +306,22 @@ sealed interface RetryAction {
 
     /**
      * Retry. If [overrideDelay] is null, use the schedule; otherwise use [overrideDelay].
+     *
+     * An override delay bypasses schedule-derived delay shaping such as caps or cutoffs for that
+     * retry step.
      */
-    data class Retry(val overrideDelay: Duration? = null) : RetryAction
+    data class Retry(val overrideDelay: Duration? = null) : RetryAction {
+        init {
+            if (overrideDelay != null) {
+                require(overrideDelay.isFinite()) {
+                    "overrideDelay must be finite, was $overrideDelay"
+                }
+                require(!overrideDelay.isNegative()) {
+                    "overrideDelay must be >= 0, was $overrideDelay"
+                }
+            }
+        }
+    }
 }
 
 class RetryPolicy<E>(
@@ -315,6 +340,9 @@ class RetryRun<E>(
 
     /**
      * Decide the next delay for [error], or null if we should stop.
+     *
+     * If the classifier returns [RetryAction.Retry] with an override delay, that override is used
+     * verbatim after consuming a schedule step.
      */
     fun nextDelay(error: E): Duration? {
         val action = classify(error, attempt)
@@ -351,7 +379,7 @@ suspend inline fun <T, reified E : Throwable> runWithRetry(
  *
  * Supports:
  *  - delta-seconds (integer or float)
- *  - HTTP-date in RFC 1123 format (e.g. "Wed, 21 Oct 2015 07:28:00 GMT")
+ *  - HTTP-date in IMF-fixdate, obsolete RFC 850, and ANSI C asctime() formats
  *
  * Returns null if the value is missing, invalid, or represents a time in the past.
  */
@@ -366,53 +394,160 @@ fun parseRetryAfterHeader(headerValue: String?, now: kotlin.time.Instant = Clock
         }
     }
 
-    // Next: HTTP-date in RFC 1123 format, e.g. "Wed, 21 Oct 2015 07:28:00 GMT"
-    // We parse it manually into a LocalDateTime in UTC.
-    val afterComma = trimmed.substringAfter(',', missingDelimiterValue = "").trim()
-    if (afterComma.isEmpty()) return null
-
-    val parts = afterComma.split(Regex("\\s+"))
-    if (parts.size != 5) return null
-
-    val day = parts[0].toIntOrNull() ?: return null
-    val month = when (parts[1].lowercase()) {
-        "jan" -> 1
-        "feb" -> 2
-        "mar" -> 3
-        "apr" -> 4
-        "may" -> 5
-        "jun" -> 6
-        "jul" -> 7
-        "aug" -> 8
-        "sep" -> 9
-        "oct" -> 10
-        "nov" -> 11
-        "dec" -> 12
-        else  -> return null
-    }
-    val year = parts[2].toIntOrNull() ?: return null
-
-    val timeParts = parts[3].split(':')
-    if (timeParts.size != 3) return null
-    val hour = timeParts[0].toIntOrNull() ?: return null
-    val minute = timeParts[1].toIntOrNull() ?: return null
-    val second = timeParts[2].toIntOrNull() ?: return null
-
-    if (!parts[4].equals("GMT", ignoreCase = true)) return null
-
-    val targetInstant = try {
-        LocalDateTime(year, month, day, hour, minute, second)
-            .toInstant(TimeZone.UTC)
-    } catch (_: IllegalArgumentException) {
-        return null
-    }
+    val targetInstant = parseHttpDate(trimmed, now) ?: return null
 
     val diff = targetInstant - now
     return if (diff.isNegative()) null else diff
 }
 
+private fun parseHttpDate(value: String, now: kotlin.time.Instant): kotlin.time.Instant? =
+    parseImfFixdate(value)
+        ?: parseRfc850Date(value, now)
+        ?: parseAsctimeDate(value)
 
-fun httpDefaultPolicy(): RetryPolicy<Throwable> {
+private fun parseImfFixdate(value: String): kotlin.time.Instant? {
+    val commaIndex = value.indexOf(',')
+    if (commaIndex <= 0) return null
+    if (!isShortDayName(value.substring(0, commaIndex))) return null
+
+    val parts = value.substring(commaIndex + 1).trim().split(httpDateWhitespace)
+    if (parts.size != 5) return null
+
+    val day = parts[0].toIntOrNull() ?: return null
+    val month = parseHttpMonth(parts[1]) ?: return null
+    val year = parts[2].toIntOrNull() ?: return null
+    val time = parseHttpTime(parts[3]) ?: return null
+    if (!parts[4].equals("GMT", ignoreCase = true)) return null
+
+    return toInstantOrNull(year, month, day, time)
+}
+
+private fun parseRfc850Date(value: String, now: kotlin.time.Instant): kotlin.time.Instant? {
+    val commaIndex = value.indexOf(',')
+    if (commaIndex <= 0) return null
+    if (!isLongDayName(value.substring(0, commaIndex))) return null
+
+    val parts = value.substring(commaIndex + 1).trim().split(httpDateWhitespace)
+    if (parts.size != 3) return null
+
+    val dateParts = parts[0].split('-')
+    if (dateParts.size != 3) return null
+
+    val day = dateParts[0].toIntOrNull() ?: return null
+    val month = parseHttpMonth(dateParts[1]) ?: return null
+    val shortYear = dateParts[2].toIntOrNull() ?: return null
+    if (shortYear !in 0..99) return null
+
+    val time = parseHttpTime(parts[1]) ?: return null
+    if (!parts[2].equals("GMT", ignoreCase = true)) return null
+
+    val year = resolveRfc850Year(shortYear, month, day, time, now)
+    return toInstantOrNull(year, month, day, time)
+}
+
+private fun parseAsctimeDate(value: String): kotlin.time.Instant? {
+    val parts = value.trim().split(httpDateWhitespace)
+    if (parts.size != 5) return null
+    if (!isShortDayName(parts[0])) return null
+
+    val month = parseHttpMonth(parts[1]) ?: return null
+    val day = parts[2].toIntOrNull() ?: return null
+    val time = parseHttpTime(parts[3]) ?: return null
+    val year = parts[4].toIntOrNull() ?: return null
+
+    return toInstantOrNull(year, month, day, time)
+}
+
+private fun resolveRfc850Year(
+    shortYear: Int,
+    month: Int,
+    day: Int,
+    time: ParsedTime,
+    now: kotlin.time.Instant,
+): Int {
+    var fullYear = (now.toLocalDateTime(TimeZone.UTC).year / 100) * 100 + shortYear
+    if (appearsMoreThanFiftyYearsInFuture(fullYear, month, day, time, now)) {
+        fullYear -= 100
+    }
+    return fullYear
+}
+
+private fun appearsMoreThanFiftyYearsInFuture(
+    year: Int,
+    month: Int,
+    day: Int,
+    time: ParsedTime,
+    now: kotlin.time.Instant,
+): Boolean =
+    toInstantOrNull(year, month, day, time)?.let { candidate ->
+        candidate > now.plus(50, DateTimeUnit.YEAR, TimeZone.UTC)
+    } ?: false
+
+private fun parseHttpMonth(value: String): Int? = when (value.lowercase()) {
+    "jan" -> 1
+    "feb" -> 2
+    "mar" -> 3
+    "apr" -> 4
+    "may" -> 5
+    "jun" -> 6
+    "jul" -> 7
+    "aug" -> 8
+    "sep" -> 9
+    "oct" -> 10
+    "nov" -> 11
+    "dec" -> 12
+    else  -> null
+}
+
+private fun parseHttpTime(value: String): ParsedTime? {
+    val timeParts = value.split(':')
+    if (timeParts.size != 3) return null
+
+    val hour = timeParts[0].toIntOrNull() ?: return null
+    val minute = timeParts[1].toIntOrNull() ?: return null
+    val second = timeParts[2].toIntOrNull() ?: return null
+    if (hour !in 0..23) return null
+    if (minute !in 0..59) return null
+    if (second !in 0..60) return null
+
+    return ParsedTime(hour = hour, minute = minute, second = second)
+}
+
+private fun toInstantOrNull(
+    year: Int,
+    month: Int,
+    day: Int,
+    time: ParsedTime,
+): kotlin.time.Instant? = try {
+    val baseInstant =
+        LocalDateTime(year, month, day, time.hour, time.minute, time.second.coerceAtMost(59))
+            .toInstant(TimeZone.UTC)
+    if (time.second == 60) baseInstant + 1.seconds else baseInstant
+} catch (_: IllegalArgumentException) {
+    null
+}
+
+private fun isShortDayName(value: String): Boolean =
+    value in shortDayNames
+
+private fun isLongDayName(value: String): Boolean =
+    value in longDayNames
+
+private data class ParsedTime(
+    val hour: Int,
+    val minute: Int,
+    val second: Int,
+)
+
+private val httpDateWhitespace = Regex("\\s+")
+
+private val shortDayNames = setOf("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+private val longDayNames =
+    setOf("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+
+fun httpIdempotentDefaultPolicy(): RetryPolicy<Throwable> {
     val schedule =
         Schedule.retries(
             maxRetries = 4,
@@ -425,6 +560,12 @@ fun httpDefaultPolicy(): RetryPolicy<Throwable> {
         when (error) {
             is HttpRequestTimeoutException -> {
                 // retry using schedule
+                RetryAction.Retry()
+            }
+
+            is ConnectTimeoutException,
+            is SocketTimeoutException,
+            is IOException -> {
                 RetryAction.Retry()
             }
 
@@ -464,7 +605,23 @@ fun httpDefaultPolicy(): RetryPolicy<Throwable> {
     }
 }
 
-suspend fun <T> retryingHttpCall(
-    policy: RetryPolicy<Throwable> = httpDefaultPolicy(),
+@Deprecated(
+    message = "This policy is intended for idempotent HTTP calls only. Use httpIdempotentDefaultPolicy instead.",
+    replaceWith = ReplaceWith("httpIdempotentDefaultPolicy()"),
+)
+fun httpDefaultPolicy(): RetryPolicy<Throwable> =
+    httpIdempotentDefaultPolicy()
+
+suspend fun <T> retryingIdempotentHttpCall(
+    policy: RetryPolicy<Throwable> = httpIdempotentDefaultPolicy(),
     block: suspend () -> T,
 ): T = runWithRetry(policy, block)
+
+@Deprecated(
+    message = "This helper assumes the wrapped HTTP call is idempotent. Use retryingIdempotentHttpCall instead.",
+    replaceWith = ReplaceWith("retryingIdempotentHttpCall(policy, block)"),
+)
+suspend fun <T> retryingHttpCall(
+    policy: RetryPolicy<Throwable> = httpIdempotentDefaultPolicy(),
+    block: suspend () -> T,
+): T = retryingIdempotentHttpCall(policy, block)
