@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 package one.wabbit.web.common
 
 import io.ktor.client.plugins.timeout
@@ -15,7 +17,9 @@ import kotlin.time.Duration.Companion.seconds
  * These values are applied through Ktor's `HttpTimeout` request configuration and only take
  * effect when that plugin and the current engine support the corresponding timeout type. The
  * default `socket` timeout is tuned for request/response APIs and may be too aggressive for
- * streaming, SSE, or long-polling workloads because it measures inactivity between packets.
+ * streaming, SSE, or long-polling workloads because it measures inactivity between packets. Use
+ * [forStreaming] when you want to preserve the base connect timeout, disable the request timeout,
+ * and ensure a longer socket stall timeout for streaming responses.
  */
 data class Timeouts(
     val request: Duration? = 15.seconds,
@@ -29,12 +33,33 @@ data class Timeouts(
     }
 }
 
+val DefaultStreamingSocketTimeout: Duration = 60.seconds
+
 fun HttpRequestBuilder.applyTimeouts(t: Timeouts) {
     timeout {
         if (t.request != null) requestTimeoutMillis = t.request.inWholeMilliseconds
         if (t.connect != null) connectTimeoutMillis = t.connect.inWholeMilliseconds
         if (t.socket != null) socketTimeoutMillis = t.socket.inWholeMilliseconds
     }
+}
+
+/**
+ * Derives a streaming-friendly timeout profile from a request/response-oriented base profile.
+ *
+ * The derived profile:
+ * - disables the request timeout
+ * - preserves the connect timeout
+ * - preserves a larger existing socket timeout, or raises it to [minimumSocketTimeout]
+ */
+fun Timeouts.forStreaming(minimumSocketTimeout: Duration = DefaultStreamingSocketTimeout): Timeouts {
+    validateTimeout("minimumSocketTimeout", minimumSocketTimeout)
+    val streamingSocketTimeout =
+        when {
+            socket == null -> minimumSocketTimeout
+            socket < minimumSocketTimeout -> minimumSocketTimeout
+            else -> socket
+        }
+    return copy(request = null, socket = streamingSocketTimeout)
 }
 
 private fun validateTimeout(name: String, duration: Duration) {

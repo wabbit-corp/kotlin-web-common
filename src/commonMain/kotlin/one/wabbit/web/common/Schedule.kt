@@ -1,12 +1,19 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+
 @file:OptIn(ExperimentalTime::class)
 
 package one.wabbit.web.common
 
 import io.ktor.client.plugins.ClientRequestException
 import io.ktor.client.plugins.HttpRequestTimeoutException
+import io.ktor.client.plugins.RedirectResponseException
 import io.ktor.client.plugins.ServerResponseException
 import io.ktor.client.network.sockets.ConnectTimeoutException
 import io.ktor.client.network.sockets.SocketTimeoutException
+import io.ktor.client.statement.HttpResponse
+import io.ktor.client.statement.discardRemaining
+import io.ktor.http.Headers
+import io.ktor.http.HttpHeaders
 import kotlinx.datetime.DateTimeUnit
 import kotlinx.datetime.DayOfWeek
 import kotlinx.datetime.LocalDate
@@ -608,6 +615,73 @@ private val longDayNames = mapOf(
     "Sunday" to DayOfWeek.SUNDAY,
 )
 
+/**
+ * Configures how idempotent HTTP retries are classified.
+ *
+ * This is used by both exception-driven helpers and response-driven helpers. The default preset
+ * favors broad compatibility with existing callers. Use [strictTransient] when you want a
+ * narrower “likely transient only” policy. Callers may include `3xx` statuses in
+ * [retryableStatuses] when they want to honor `Retry-After` on redirects.
+ */
+@ConsistentCopyVisibility
+data class HttpRetryOptions private constructor(
+    val schedule: Schedule,
+    val retryOnGenericIoException: Boolean,
+    val retryableStatuses: Set<Int>,
+    val respectRetryAfter: Boolean,
+    val maxRetryAfterDelay: Duration?,
+    private val copied: Boolean = true,
+) {
+    constructor(
+        schedule: Schedule = defaultHttpRetrySchedule(),
+        retryOnGenericIoException: Boolean = true,
+        retryableStatuses: Set<Int> = defaultBroadRetryableStatuses,
+        respectRetryAfter: Boolean = true,
+        maxRetryAfterDelay: Duration? = null,
+    ) : this(
+        schedule = schedule,
+        retryOnGenericIoException = retryOnGenericIoException,
+        retryableStatuses = retryableStatuses.toSet(),
+        respectRetryAfter = respectRetryAfter,
+        maxRetryAfterDelay = maxRetryAfterDelay,
+        copied = true,
+    )
+
+    init {
+        require(retryableStatuses.all { it in 100..599 }) {
+            "retryableStatuses must contain valid HTTP status codes, was $retryableStatuses"
+        }
+        maxRetryAfterDelay?.let { requireFiniteNonNegativeDuration("maxRetryAfterDelay", it) }
+    }
+
+    companion object {
+        fun broadIdempotent(
+            schedule: Schedule = defaultHttpRetrySchedule(),
+            respectRetryAfter: Boolean = true,
+            maxRetryAfterDelay: Duration? = null,
+        ): HttpRetryOptions =
+            HttpRetryOptions(
+                schedule = schedule,
+                retryOnGenericIoException = true,
+                retryableStatuses = defaultBroadRetryableStatuses,
+                respectRetryAfter = respectRetryAfter,
+                maxRetryAfterDelay = maxRetryAfterDelay,
+            )
+
+        fun strictTransient(
+            schedule: Schedule = defaultHttpRetrySchedule(),
+            respectRetryAfter: Boolean = true,
+            maxRetryAfterDelay: Duration? = null,
+        ): HttpRetryOptions =
+            HttpRetryOptions(
+                schedule = schedule,
+                retryOnGenericIoException = false,
+                retryableStatuses = defaultStrictRetryableStatuses,
+                respectRetryAfter = respectRetryAfter,
+                maxRetryAfterDelay = maxRetryAfterDelay,
+            )
+    }
+}
 
 /**
  * Default retry policy for idempotent HTTP operations.
@@ -619,73 +693,87 @@ private val longDayNames = mapOf(
  *
  * Status-based retries only apply when the wrapped HTTP call throws a Ktor response exception,
  * which usually means `expectSuccess = true` or an installed response validator. Calls that
- * return a normal [io.ktor.client.statement.HttpResponse] for 4xx/5xx statuses will not be
- * retried by this policy unless the caller converts those statuses into exceptions.
+ * return a normal [io.ktor.client.statement.HttpResponse] for retryable statuses will not be
+ * retried by this policy unless the caller converts those statuses into exceptions. If
+ * [HttpRetryOptions.retryableStatuses] includes redirect codes, this policy also classifies
+ * [RedirectResponseException].
  */
-fun httpIdempotentDefaultPolicy(): RetryPolicy<Throwable> {
-    val schedule =
-        Schedule.retries(
-            maxRetries = 4,
-            baseDelay = 200.milliseconds,
-            maxDelay = 5.seconds,
-            jitterFactor = 0.2,
-        )
-
-    return RetryPolicy(schedule) { error, attempt ->
+fun httpThrowableRetryPolicy(options: HttpRetryOptions): RetryPolicy<Throwable> =
+    RetryPolicy(options.schedule) { error, _ ->
         when (error) {
-            is HttpRequestTimeoutException -> {
-                // retry using schedule
-                RetryAction.Retry()
-            }
+            is HttpRequestTimeoutException -> RetryAction.Retry()
 
             is ConnectTimeoutException,
-            is SocketTimeoutException,
-            is IOException -> {
-                RetryAction.Retry()
-            }
+            is SocketTimeoutException -> RetryAction.Retry()
+
+            is IOException -> if (options.retryOnGenericIoException) RetryAction.Retry() else RetryAction.Stop
 
             is ServerResponseException -> {
-                val status = error.response.status.value
-                val retryAfter =
-                    parseRetryAfterHeader(error.response.headers["Retry-After"])
+                classifyHttpRetryFromStatus(error.response.status.value, error.response.headers, options)
+            }
 
-                if (status in 500..599) {
-                    if (retryAfter != null) {
-                        RetryAction.Retry(retryAfter)
-                    } else {
-                        RetryAction.Retry()
-                    }
-                } else {
-                    RetryAction.Stop
-                }
+            is RedirectResponseException -> {
+                classifyHttpRetryFromStatus(error.response.status.value, error.response.headers, options)
             }
 
             is ClientRequestException -> {
-                // 4xx except maybe 429 are usually "don't retry"
-                val status = error.response.status.value
-                if (status == 408) {
-                    // Request Timeout - may retry
-                    RetryAction.Retry()
-                } else if (status == 429) {
-                    val retryAfter =
-                        parseRetryAfterHeader(error.response.headers["Retry-After"])
-                    RetryAction.Retry(retryAfter)
-                } else {
-                    RetryAction.Stop
-                }
+                classifyHttpRetryFromStatus(error.response.status.value, error.response.headers, options)
             }
 
             else -> RetryAction.Stop
         }
     }
-}
 
-@Deprecated(
-    message = "This policy is intended for idempotent HTTP calls only. Use httpIdempotentDefaultPolicy instead.",
-    replaceWith = ReplaceWith("httpIdempotentDefaultPolicy()"),
-)
-fun httpDefaultPolicy(): RetryPolicy<Throwable> =
-    httpIdempotentDefaultPolicy()
+/**
+ * Broad idempotent retry policy for thrown HTTP failures and transport exceptions.
+ *
+ * This matches the historical default surface: `408`, `429`, all `5xx`, timeout exceptions, and
+ * generic [IOException].
+ */
+fun httpBroadIdempotentPolicy(
+    options: HttpRetryOptions = HttpRetryOptions.broadIdempotent(),
+): RetryPolicy<Throwable> =
+    httpThrowableRetryPolicy(options)
+
+/**
+ * Narrower preset for failures that are usually transient across HTTP clients and intermediaries.
+ *
+ * This retries `408`, `429`, `502`, `503`, `504`, and timeout/connect exceptions, but not generic
+ * [IOException] and not the entire `5xx` range.
+ */
+fun httpStrictTransientPolicy(
+    options: HttpRetryOptions = HttpRetryOptions.strictTransient(),
+): RetryPolicy<Throwable> =
+    httpThrowableRetryPolicy(options)
+
+fun httpIdempotentDefaultPolicy(): RetryPolicy<Throwable> =
+    httpBroadIdempotentPolicy()
+
+/**
+ * Default retry policy for idempotent HTTP calls that return [HttpResponse] objects directly.
+ *
+ * Unlike [httpIdempotentDefaultPolicy], this policy inspects [HttpResponse.status] instead of
+ * relying on Ktor response exceptions. The broad default retries `408`, `429`, and `5xx`
+ * responses, but callers may supply any retryable status set through [HttpRetryOptions]. When
+ * enabled, `Retry-After` is honored for any configured retryable status.
+ */
+fun httpResponseRetryPolicy(options: HttpRetryOptions): RetryPolicy<HttpResponse> =
+    RetryPolicy(options.schedule) { response, _ ->
+        classifyHttpRetryFromStatus(response.status.value, response.headers, options)
+    }
+
+fun httpBroadIdempotentResponsePolicy(
+    options: HttpRetryOptions = HttpRetryOptions.broadIdempotent(),
+): RetryPolicy<HttpResponse> =
+    httpResponseRetryPolicy(options)
+
+fun httpStrictTransientResponsePolicy(
+    options: HttpRetryOptions = HttpRetryOptions.strictTransient(),
+): RetryPolicy<HttpResponse> =
+    httpResponseRetryPolicy(options)
+
+fun httpIdempotentResponseDefaultPolicy(): RetryPolicy<HttpResponse> =
+    httpBroadIdempotentResponsePolicy()
 
 /**
  * Run an idempotent HTTP operation with retry support.
@@ -711,33 +799,65 @@ suspend fun <T> retryingIdempotentHttpCall(
     block: suspend () -> T,
 ): T = runWithRetry(policy, random, block)
 
-@Deprecated(
-    message = "This helper assumes the wrapped HTTP call is idempotent. Use retryingIdempotentHttpCall instead.",
-    replaceWith = ReplaceWith("retryingIdempotentHttpCall(policy, block)"),
-)
-suspend fun <T> retryingHttpCall(
-    policy: RetryPolicy<Throwable> = httpIdempotentDefaultPolicy(),
-    block: suspend () -> T,
-): T = retryingIdempotentHttpCall(policy, block)
+/**
+ * Run an idempotent HTTP operation that returns [HttpResponse] with retry support based on
+ * [HttpResponse.status], even when the call does not throw for non-success statuses.
+ *
+ * Retryable responses are drained with [discardRemaining] before the helper waits and retries so
+ * the underlying connection can be reused when possible.
+ */
+suspend fun retryingIdempotentHttpResponseCall(
+    policy: RetryPolicy<HttpResponse> = httpIdempotentResponseDefaultPolicy(),
+    block: suspend () -> HttpResponse,
+): HttpResponse = retryingIdempotentHttpResponseCall(policy, Random.Default, block)
 
-@Deprecated(
-    message = "This helper assumes the wrapped HTTP call is idempotent. Use retryingIdempotentHttpCall instead.",
-    replaceWith = ReplaceWith("retryingIdempotentHttpCall(random, block)"),
-)
-suspend fun <T> retryingHttpCall(
+suspend fun retryingIdempotentHttpResponseCall(
     random: Random,
-    block: suspend () -> T,
-): T = retryingIdempotentHttpCall(random, block)
+    block: suspend () -> HttpResponse,
+): HttpResponse = retryingIdempotentHttpResponseCall(httpIdempotentResponseDefaultPolicy(), random, block)
 
-@Deprecated(
-    message = "This helper assumes the wrapped HTTP call is idempotent. Use retryingIdempotentHttpCall instead.",
-    replaceWith = ReplaceWith("retryingIdempotentHttpCall(policy, random, block)"),
-)
-suspend fun <T> retryingHttpCall(
-    policy: RetryPolicy<Throwable>,
+suspend fun retryingIdempotentHttpResponseCall(
+    policy: RetryPolicy<HttpResponse>,
     random: Random,
-    block: suspend () -> T,
-): T = retryingIdempotentHttpCall(policy, random, block)
+    block: suspend () -> HttpResponse,
+): HttpResponse {
+    val run = policy.newRun(random)
+    while (true) {
+        val response = block()
+        val delay = run.nextDelay(response) ?: return response
+        runCatching { response.discardRemaining() }
+        kotlinx.coroutines.delay(delay)
+    }
+}
+
+/**
+ * Run an idempotent HTTP operation with response-status-based retry support and transform the
+ * final response into a caller-defined result.
+ *
+ * This helper retries based on [HttpResponse.status] exactly like
+ * [retryingIdempotentHttpResponseCall], but hides the intermediate [HttpResponse] from the caller
+ * until a non-retryable response is reached. Retryable responses are drained with
+ * [discardRemaining] before retrying. The [transform] block runs only for the final response.
+ */
+suspend fun <T> retryingIdempotentHttpResponseBodyCall(
+    policy: RetryPolicy<HttpResponse> = httpIdempotentResponseDefaultPolicy(),
+    request: suspend () -> HttpResponse,
+    transform: suspend (HttpResponse) -> T,
+): T = retryingIdempotentHttpResponseBodyCall(policy, Random.Default, request, transform)
+
+suspend fun <T> retryingIdempotentHttpResponseBodyCall(
+    random: Random,
+    request: suspend () -> HttpResponse,
+    transform: suspend (HttpResponse) -> T,
+): T = retryingIdempotentHttpResponseBodyCall(httpIdempotentResponseDefaultPolicy(), random, request, transform)
+
+suspend fun <T> retryingIdempotentHttpResponseBodyCall(
+    policy: RetryPolicy<HttpResponse>,
+    random: Random,
+    request: suspend () -> HttpResponse,
+    transform: suspend (HttpResponse) -> T,
+): T =
+    transform(retryingIdempotentHttpResponseCall(policy, random, request))
 
 private fun requireFiniteNonNegativeDuration(name: String, duration: Duration) {
     require(duration.isFinite()) { "$name must be finite, was $duration" }
@@ -747,4 +867,41 @@ private fun requireFiniteNonNegativeDuration(name: String, duration: Duration) {
 private fun requireFinitePositiveDouble(name: String, value: Double) {
     require(value.isFinite()) { "$name must be finite, was $value" }
     require(value > 0.0) { "$name must be > 0, was $value" }
+}
+
+private fun defaultHttpRetrySchedule(): Schedule =
+    Schedule.retries(
+        maxRetries = 4,
+        baseDelay = 200.milliseconds,
+        maxDelay = 5.seconds,
+        jitterFactor = 0.2,
+    )
+
+private fun classifyHttpRetryFromStatus(
+    status: Int,
+    headers: Headers,
+    options: HttpRetryOptions,
+): RetryAction =
+    if (status in options.retryableStatuses) {
+        val retryAfter =
+            if (options.respectRetryAfter) parseRetryAfterHeader(headers[HttpHeaders.RetryAfter]) else null
+        RetryAction.Retry(clampRetryAfterDelay(retryAfter, options.maxRetryAfterDelay))
+    } else {
+        RetryAction.Stop
+    }
+
+private fun clampRetryAfterDelay(retryAfter: Duration?, maxRetryAfterDelay: Duration?): Duration? =
+    when {
+        retryAfter == null -> null
+        maxRetryAfterDelay == null -> retryAfter
+        retryAfter > maxRetryAfterDelay -> maxRetryAfterDelay
+        else -> retryAfter
+    }
+
+private val defaultStrictRetryableStatuses = setOf(408, 429, 502, 503, 504)
+
+private val defaultBroadRetryableStatuses = buildSet {
+    add(408)
+    add(429)
+    addAll(500..599)
 }
