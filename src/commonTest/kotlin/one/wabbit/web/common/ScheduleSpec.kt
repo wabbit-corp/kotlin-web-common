@@ -1,8 +1,8 @@
-// SPDX-License-Identifier: LicenseRef-Wabbit-Public-Test-License
+// SPDX-License-Identifier: LicenseRef-Wabbit-Public-Test-License-1.1
 
 package one.wabbit.web.common
 
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.runTest
 import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertContains
@@ -173,7 +173,7 @@ class ScheduleSpec {
     }
 
     @Test
-    fun `runWithRetry supports legacy and explicit random overloads`() = runBlocking {
+    fun `runWithRetry supports legacy and explicit random overloads`() = runTest {
         val policy =
             RetryPolicy<IllegalStateException>(
                 schedule = Schedule.fixed(Duration.ZERO, 1),

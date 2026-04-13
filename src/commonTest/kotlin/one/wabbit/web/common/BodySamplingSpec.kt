@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: LicenseRef-Wabbit-Public-Test-License
+// SPDX-License-Identifier: LicenseRef-Wabbit-Public-Test-License-1.1
 
 package one.wabbit.web.common
 
@@ -12,7 +12,7 @@ import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
-import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
@@ -24,7 +24,7 @@ import kotlin.test.assertTrue
 class BodySamplingSpec {
     @Test
     fun `consumeBodyPrefixUtf8Sample reports prefix metadata`() {
-        runBlocking {
+        runTest {
             val client =
                 HttpClient(MockEngine) {
                     engine {
@@ -52,7 +52,7 @@ class BodySamplingSpec {
 
     @Test
     fun `consumeBodyPrefixUtf8Sample distinguishes complete samples from limit reached`() {
-        runBlocking {
+        runTest {
             val client =
                 HttpClient(MockEngine) {
                     engine {
@@ -80,7 +80,7 @@ class BodySamplingSpec {
 
     @Test
     fun `consumeRawBodyPrefixUtf8 preserves legacy string helper behavior`() {
-        runBlocking {
+        runTest {
             val client =
                 HttpClient(MockEngine) {
                     engine {
@@ -105,7 +105,7 @@ class BodySamplingSpec {
 
     @Test
     fun `consumeRawBodyPrefixUtf8OrNull returns sampled text when sampling succeeds`() {
-        runBlocking {
+        runTest {
             val client =
                 HttpClient(MockEngine) {
                     engine {
@@ -130,7 +130,7 @@ class BodySamplingSpec {
 
     @Test
     fun `responseBodySampleOrNull returns a best effort sample from response exceptions`() {
-        runBlocking {
+        runTest {
             val client =
                 HttpClient(MockEngine) {
                     expectSuccess = true
@@ -162,7 +162,7 @@ class BodySamplingSpec {
 
     @Test
     fun `consumeBodyPrefixUtf8Sample ignores declared charset and decodes diagnostically as UTF-8`() {
-        runBlocking {
+        runTest {
             val client =
                 HttpClient(MockEngine) {
                     engine {
@@ -194,7 +194,7 @@ class BodySamplingSpec {
 
     @Test
     fun `consumeBodyPrefixUtf8Sample returns compressed bytes as diagnostic text`() {
-        runBlocking {
+        runTest {
             val gzipAbc =
                 byteArrayOf(
                     31,

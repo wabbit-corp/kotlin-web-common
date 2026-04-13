@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: LicenseRef-Wabbit-Public-Test-License
+// SPDX-License-Identifier: LicenseRef-Wabbit-Public-Test-License-1.1
 
 package one.wabbit.web.common
 
@@ -15,7 +15,6 @@ import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.runTest
 import kotlinx.io.IOException
@@ -29,7 +28,7 @@ import kotlin.time.Duration.Companion.seconds
 @OptIn(ExperimentalCoroutinesApi::class)
 class HttpPolicySpec {
     @Test
-    fun `retrying idempotent helpers support default and explicit random overloads`() = runBlocking {
+    fun `retrying idempotent helpers support default and explicit random overloads`() = runTest {
         val policy =
             RetryPolicy<Throwable>(
                 schedule = Schedule.fixed(kotlin.time.Duration.ZERO, 1),
@@ -80,7 +79,7 @@ class HttpPolicySpec {
     }
 
     @Test
-    fun `strict transient response policy does not retry generic 500`() = runBlocking {
+    fun `strict transient response policy does not retry generic 500`() = runTest {
         val client =
             HttpClient(MockEngine) {
                 engine {
@@ -106,7 +105,7 @@ class HttpPolicySpec {
     }
 
     @Test
-    fun `custom response retry options can target specific statuses`() = runBlocking {
+    fun `custom response retry options can target specific statuses`() = runTest {
         val client =
             HttpClient(MockEngine) {
                 engine {
@@ -143,7 +142,7 @@ class HttpPolicySpec {
     }
 
     @Test
-    fun `custom throwable retry options can target redirect statuses`() = runBlocking {
+    fun `custom throwable retry options can target redirect statuses`() = runTest {
         var attempts = 0
         val client =
             HttpClient(MockEngine) {
@@ -197,7 +196,7 @@ class HttpPolicySpec {
     }
 
     @Test
-    fun `retry after can be clamped through retry options`() = runBlocking {
+    fun `retry after can be clamped through retry options`() = runTest {
         val client =
             HttpClient(MockEngine) {
                 engine {
@@ -246,7 +245,7 @@ class HttpPolicySpec {
     }
 
     @Test
-    fun `retry after is ignored when respectRetryAfter is false even with a clamp`() = runBlocking {
+    fun `retry after is ignored when respectRetryAfter is false even with a clamp`() = runTest {
         val client =
             HttpClient(MockEngine) {
                 engine {
@@ -283,7 +282,7 @@ class HttpPolicySpec {
     }
 
     @Test
-    fun `retryingIdempotentHttpCall retries 408 responses`() = runBlocking {
+    fun `retryingIdempotentHttpCall retries 408 responses`() = runTest {
         var attempts = 0
         val client =
             HttpClient(MockEngine) {
@@ -323,7 +322,7 @@ class HttpPolicySpec {
     }
 
     @Test
-    fun `retryingIdempotentHttpCall retries 429 responses with retry after`() = runBlocking {
+    fun `retryingIdempotentHttpCall retries 429 responses with retry after`() = runTest {
         var attempts = 0
         val client =
             HttpClient(MockEngine) {
@@ -366,7 +365,7 @@ class HttpPolicySpec {
     }
 
     @Test
-    fun `retryingIdempotentHttpCall does not retry non retryable client errors`() = runBlocking {
+    fun `retryingIdempotentHttpCall does not retry non retryable client errors`() = runTest {
         var attempts = 0
         val client =
             HttpClient(MockEngine) {
@@ -397,7 +396,7 @@ class HttpPolicySpec {
     }
 
     @Test
-    fun `retryingIdempotentHttpCall does not retry status responses that do not throw`() = runBlocking {
+    fun `retryingIdempotentHttpCall does not retry status responses that do not throw`() = runTest {
         var attempts = 0
         val client =
             HttpClient(MockEngine) {
@@ -430,7 +429,7 @@ class HttpPolicySpec {
     }
 
     @Test
-    fun `retryingIdempotentHttpResponseCall retries status responses without expectSuccess`() = runBlocking {
+    fun `retryingIdempotentHttpResponseCall retries status responses without expectSuccess`() = runTest {
         var attempts = 0
         val client =
             HttpClient(MockEngine) {
@@ -472,7 +471,7 @@ class HttpPolicySpec {
     }
 
     @Test
-    fun `retryingIdempotentHttpResponseCall returns non retryable status immediately`() = runBlocking {
+    fun `retryingIdempotentHttpResponseCall returns non retryable status immediately`() = runTest {
         var attempts = 0
         val client =
             HttpClient(MockEngine) {
@@ -503,7 +502,7 @@ class HttpPolicySpec {
     }
 
     @Test
-    fun `retryingIdempotentHttpResponseBodyCall retries before transforming final response`() = runBlocking {
+    fun `retryingIdempotentHttpResponseBodyCall retries before transforming final response`() = runTest {
         var attempts = 0
         var transforms = 0
         val client =
@@ -550,7 +549,7 @@ class HttpPolicySpec {
     }
 
     @Test
-    fun `retryingIdempotentHttpResponseBodyCall returns non retryable body immediately`() = runBlocking {
+    fun `retryingIdempotentHttpResponseBodyCall returns non retryable body immediately`() = runTest {
         var attempts = 0
         val client =
             HttpClient(MockEngine) {
@@ -581,7 +580,7 @@ class HttpPolicySpec {
     }
 
     @Test
-    fun `retryingIdempotentHttpResponseBodyCall supports explicit random overload`() = runBlocking {
+    fun `retryingIdempotentHttpResponseBodyCall supports explicit random overload`() = runTest {
         var attempts = 0
         val client =
             HttpClient(MockEngine) {
