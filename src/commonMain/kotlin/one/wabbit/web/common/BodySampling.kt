@@ -10,6 +10,13 @@ import kotlinx.serialization.Serializable
 import kotlinx.io.Buffer
 import kotlinx.io.readByteArray
 
+/**
+ * UTF-8 diagnostic prefix sampled from the raw response body stream.
+ *
+ * @property text sampled bytes decoded as UTF-8.
+ * @property bytesRead number of raw bytes consumed from the response body channel.
+ * @property limitReached true when exactly the requested byte limit was consumed.
+ */
 @Serializable
 data class BodyPrefixUtf8Sample(
     val text: String,

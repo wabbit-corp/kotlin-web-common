@@ -10,9 +10,13 @@ looking for a complete HTTP client by itself. It does not choose an engine for y
 hide Ktor. Instead, it gives you a small shared toolkit for the repetitive parts around Ktor
 requests.
 
-## Coordinates
+## Installation
 
 ```kotlin
+repositories {
+    mavenCentral()
+}
+
 dependencies {
     implementation("one.wabbit:kotlin-web-common:1.1.0")
 
@@ -49,7 +53,7 @@ If you are targeting Apple platforms, use the appropriate Darwin engine instead 
 timeouts only take effect when that plugin is installed and when the selected Ktor engine supports
 the timeout type you are setting.
 
-## Minimal Example
+## Quick Start
 
 This is the smallest useful slice of the library: parsing `Retry-After` and compiling a retry
 schedule.
@@ -67,9 +71,6 @@ val run = Schedule.retries(maxRetries = 1).compile(random = Random(1))
 val firstDelay = run.next()
 check(firstDelay != null)
 ```
-
-This example is exercised by the standalone smoke consumer in
-[`tmp/release-checklist/external-consumer`](./tmp/release-checklist/external-consumer).
 
 ## Practical Example
 
@@ -107,8 +108,6 @@ suspend fun fetchText(
     )
 ```
 
-That shape is also exercised by the standalone smoke consumer.
-
 ## Sharp Edges
 
 - `retryingIdempotentHttpCall(...)` is exception-driven. It only retries HTTP statuses when the
@@ -124,6 +123,16 @@ That shape is also exercised by the standalone smoke consumer.
 - `Timeouts()` defaults are request/response-oriented. For SSE, long-polling, or quiet streaming
   responses, prefer `Timeouts.forStreaming(...)`.
 - `Schedule.Exponential` can overflow finite `Duration` values if you leave it unbounded.
+
+## Documentation
+
+- [User guide](docs/user-guide.md)
+- [API reference notes](docs/api-reference.md)
+- [Troubleshooting](docs/troubleshooting.md)
+- [Development](docs/development.md)
+
+Generated API docs can be built locally with Dokka. See [API reference notes](docs/api-reference.md)
+for the command.
 
 ## Release Notes
 

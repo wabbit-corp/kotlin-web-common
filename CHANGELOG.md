@@ -16,6 +16,8 @@ client family.
 - `Etiquette` plus `applyEtiquette(...)`
 - `Timeouts`, `applyTimeouts(...)`, and `Timeouts.forStreaming(...)`
 - raw diagnostic body sampling helpers
+- publication-ready README, user guide, API-reference notes, troubleshooting, and development docs
+- expanded KDoc for the public timeout, etiquette, body-sampling, schedule, retry, and HTTP policy APIs
 
 ### Behavior Notes
 

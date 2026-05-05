@@ -22,8 +22,11 @@ import kotlin.time.Duration.Companion.seconds
  * and ensure a longer socket stall timeout for streaming responses.
  */
 data class Timeouts(
+    /** Overall request timeout, or null to leave it unset. */
     val request: Duration? = 15.seconds,
+    /** Connection-establishment timeout, or null to leave it unset. */
     val connect: Duration? = 15.seconds,
+    /** Socket inactivity timeout, or null to leave it unset. */
     val socket: Duration? = 15.seconds,
 ) {
     init {
@@ -33,8 +36,17 @@ data class Timeouts(
     }
 }
 
+/**
+ * Default socket inactivity timeout used by [forStreaming].
+ */
 val DefaultStreamingSocketTimeout: Duration = 60.seconds
 
+/**
+ * Applies [t] to this request through Ktor's `HttpTimeout` request configuration.
+ *
+ * The target [io.ktor.client.HttpClient] must have the `HttpTimeout` plugin installed, and the
+ * selected Ktor engine must support the requested timeout type.
+ */
 fun HttpRequestBuilder.applyTimeouts(t: Timeouts) {
     timeout {
         if (t.request != null) requestTimeoutMillis = t.request.inWholeMilliseconds

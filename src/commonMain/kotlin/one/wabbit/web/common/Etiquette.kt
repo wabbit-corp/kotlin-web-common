@@ -6,6 +6,16 @@ import io.ktor.client.request.HttpRequestBuilder
 import io.ktor.http.HttpHeaders
 import io.ktor.http.headers
 
+/**
+ * Request etiquette headers shared by Wabbit HTTP clients.
+ *
+ * The [userAgent] is required and must be a valid HTTP header value. [referer] is optional. Extra
+ * headers are defensively copied and validated, but must not override `User-Agent` or `Referer`.
+ *
+ * @property userAgent value for the `User-Agent` header.
+ * @property referer optional value for the `Referer` header.
+ * @property extraHeaders additional validated headers to set on each request.
+ */
 @ConsistentCopyVisibility
 data class Etiquette private constructor(
     val userAgent: String,
@@ -44,6 +54,9 @@ data class Etiquette private constructor(
     }
 }
 
+/**
+ * Applies [etiquette] headers to this Ktor request builder.
+ */
 fun HttpRequestBuilder.applyEtiquette(etiquette: Etiquette) {
     headers {
         set(HttpHeaders.UserAgent, etiquette.userAgent)

@@ -32,12 +32,18 @@ import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Duration.Companion.seconds
 import kotlin.time.ExperimentalTime
 
-// A schedule can be thought of as a way to represent a finite or infinite
-// sequence of time intervals.
+/**
+ * Declarative finite or infinite sequence of retry delays.
+ *
+ * Schedules are immutable descriptions. Use [compile] to create a mutable [StatefulSchedule] for a
+ * single retry loop.
+ */
 @Serializable
 sealed interface Schedule {
+    /** Emit one immediate retry delay of [Duration.ZERO], then stop. */
     @Serializable data object Now : Schedule
 
+    /** Emit no retry delays. */
     @Serializable data object Never : Schedule
 
     /**
@@ -130,12 +136,20 @@ sealed interface Schedule {
         }
     }
 
+    /**
+     * Clamp each delay emitted by [schedule] to at most [maxDelay].
+     */
     @Serializable data class CapDelay(val schedule: Schedule, val maxDelay: Duration) : Schedule {
         init {
             requireFiniteNonNegativeDuration("maxDelay", maxDelay)
         }
     }
 
+    /**
+     * Applies symmetric multiplicative jitter around each emitted delay.
+     *
+     * A [jitterFactor] of `0.2` scales each delay by a random value in `[0.8, 1.2)`.
+     */
     fun jittered(jitterFactor: Double): Schedule =
         when {
             jitterFactor == 0.0 -> this
@@ -167,9 +181,15 @@ sealed interface Schedule {
     fun cutoff(duration: Duration): Schedule =
         Schedule.WithCutoff(this, duration)
 
+    /** Factory methods for common retry schedules. */
     companion object {
+        /**
+         * Standard bounded exponential retry schedule.
+         *
+         * Total attempts for a retry loop are one initial attempt plus [maxRetries] scheduled retry
+         * delays. Jitter is applied before [maxDelay] caps each emitted delay.
+         */
         fun retries(
-            /** Total attempts = 1 (initial) + maxRetries. */
             maxRetries: Int = 2,
             baseDelay: Duration = 200.milliseconds,
             maxDelay: Duration = 5.seconds,
@@ -187,12 +207,17 @@ sealed interface Schedule {
             return core
         }
 
+        /** Repeats [spaced] forever. */
         fun forever(spaced: Duration): Schedule =
             Schedule.Forever(spaced)
 
+        /** Emits [times] retry delays, each equal to [delay]. */
         fun fixed(delay: Duration, times: Int): Schedule =
             Schedule.Recurs(times, delay)
 
+        /**
+         * Exponential retry schedule with optional retry limit, delay cap, and jitter.
+         */
         fun exponential(
             base: Duration,
             factor: Double = 2.0,
@@ -215,9 +240,15 @@ sealed interface Schedule {
  * Not thread-safe; assume you create one per retry loop.
  */
 fun interface StatefulSchedule {
+    /** Returns the next delay, or null when the schedule is exhausted. */
     fun next(): Duration?
 }
 
+/**
+ * Compiles this immutable schedule into a mutable single-use [StatefulSchedule].
+ *
+ * The [random] source is used only by [Schedule.Jittered] nodes.
+ */
 fun Schedule.compile(
     random: Random = Random.Default,
 ): StatefulSchedule = when (this) {
@@ -342,6 +373,9 @@ fun Schedule.compile(
     }
 }
 
+/**
+ * Classification result for one retryable error or response.
+ */
 sealed interface RetryAction {
     /** Do not retry. */
     data object Stop : RetryAction
@@ -366,14 +400,24 @@ sealed interface RetryAction {
     }
 }
 
+/**
+ * Retry policy for errors or responses of type [E].
+ *
+ * @param schedule delay schedule consumed by each retry run.
+ * @param classify classifies an error/response and zero-based retry attempt into a [RetryAction].
+ */
 class RetryPolicy<E>(
     private val schedule: Schedule,
     private val classify: (error: E, attempt: Int) -> RetryAction,
 ) {
+    /** Creates a fresh mutable retry run backed by this policy. */
     fun newRun(random: Random = Random.Default): RetryRun<E> =
         RetryRun(schedule.compile(random), classify)
 }
 
+/**
+ * Mutable state for one execution of a [RetryPolicy].
+ */
 class RetryRun<E>(
     private val stateful: StatefulSchedule,
     private val classify: (E, Int) -> RetryAction,
@@ -399,11 +443,19 @@ class RetryRun<E>(
     }
 }
 
+/**
+ * Runs [block] until it succeeds or [policy] declines to retry a thrown [E].
+ *
+ * [CancellationException] and throwables that are not [E] are rethrown immediately.
+ */
 suspend inline fun <T, reified E : Throwable> runWithRetry(
     policy: RetryPolicy<E>,
     block: suspend () -> T,
 ): T = runWithRetry(policy, Random.Default, block)
 
+/**
+ * Runs [block] with retry support using [random] for jittered schedules.
+ */
 suspend inline fun <T, reified E : Throwable> runWithRetry(
     policy: RetryPolicy<E>,
     random: Random,
@@ -619,9 +671,15 @@ private val longDayNames = mapOf(
  * Configures how idempotent HTTP retries are classified.
  *
  * This is used by both exception-driven helpers and response-driven helpers. The default preset
- * favors broad compatibility with existing callers. Use [strictTransient] when you want a
- * narrower “likely transient only” policy. Callers may include `3xx` statuses in
+ * favors broad compatibility with existing callers. Use [HttpRetryOptions.strictTransient] when you
+ * want a narrower likely-transient-only policy. Callers may include `3xx` statuses in
  * [retryableStatuses] when they want to honor `Retry-After` on redirects.
+ *
+ * @property schedule retry schedule used by policies created from these options.
+ * @property retryOnGenericIoException whether generic [IOException] values should be retried.
+ * @property retryableStatuses HTTP status codes that should be retried.
+ * @property respectRetryAfter whether a `Retry-After` header can override the schedule delay.
+ * @property maxRetryAfterDelay optional cap for `Retry-After` delays.
  */
 @ConsistentCopyVisibility
 data class HttpRetryOptions private constructor(
@@ -654,7 +712,12 @@ data class HttpRetryOptions private constructor(
         maxRetryAfterDelay?.let { requireFiniteNonNegativeDuration("maxRetryAfterDelay", it) }
     }
 
+    /** Preset constructors for idempotent HTTP retry options. */
     companion object {
+        /**
+         * Broad idempotent preset: retries `408`, `429`, all `5xx`, timeout/connect exceptions, and
+         * generic [IOException].
+         */
         fun broadIdempotent(
             schedule: Schedule = defaultHttpRetrySchedule(),
             respectRetryAfter: Boolean = true,
@@ -668,6 +731,10 @@ data class HttpRetryOptions private constructor(
                 maxRetryAfterDelay = maxRetryAfterDelay,
             )
 
+        /**
+         * Strict transient preset: retries `408`, `429`, `502`, `503`, `504`, timeout/connect
+         * exceptions, but not generic [IOException].
+         */
         fun strictTransient(
             schedule: Schedule = defaultHttpRetrySchedule(),
             respectRetryAfter: Boolean = true,
@@ -746,6 +813,9 @@ fun httpStrictTransientPolicy(
 ): RetryPolicy<Throwable> =
     httpThrowableRetryPolicy(options)
 
+/**
+ * Historical default throwable policy for idempotent HTTP operations.
+ */
 fun httpIdempotentDefaultPolicy(): RetryPolicy<Throwable> =
     httpBroadIdempotentPolicy()
 
@@ -762,16 +832,25 @@ fun httpResponseRetryPolicy(options: HttpRetryOptions): RetryPolicy<HttpResponse
         classifyHttpRetryFromStatus(response.status.value, response.headers, options)
     }
 
+/**
+ * Broad idempotent retry policy for returned [HttpResponse] values.
+ */
 fun httpBroadIdempotentResponsePolicy(
     options: HttpRetryOptions = HttpRetryOptions.broadIdempotent(),
 ): RetryPolicy<HttpResponse> =
     httpResponseRetryPolicy(options)
 
+/**
+ * Narrower transient retry policy for returned [HttpResponse] values.
+ */
 fun httpStrictTransientResponsePolicy(
     options: HttpRetryOptions = HttpRetryOptions.strictTransient(),
 ): RetryPolicy<HttpResponse> =
     httpResponseRetryPolicy(options)
 
+/**
+ * Historical default response policy for idempotent HTTP operations.
+ */
 fun httpIdempotentResponseDefaultPolicy(): RetryPolicy<HttpResponse> =
     httpBroadIdempotentResponsePolicy()
 
@@ -788,11 +867,17 @@ suspend fun <T> retryingIdempotentHttpCall(
     block: suspend () -> T,
 ): T = retryingIdempotentHttpCall(policy, Random.Default, block)
 
+/**
+ * Run an idempotent HTTP operation with the default throwable policy and explicit [random] source.
+ */
 suspend fun <T> retryingIdempotentHttpCall(
     random: Random,
     block: suspend () -> T,
 ): T = retryingIdempotentHttpCall(httpIdempotentDefaultPolicy(), random, block)
 
+/**
+ * Run an idempotent HTTP operation with explicit throwable [policy] and [random] source.
+ */
 suspend fun <T> retryingIdempotentHttpCall(
     policy: RetryPolicy<Throwable>,
     random: Random,
@@ -811,11 +896,18 @@ suspend fun retryingIdempotentHttpResponseCall(
     block: suspend () -> HttpResponse,
 ): HttpResponse = retryingIdempotentHttpResponseCall(policy, Random.Default, block)
 
+/**
+ * Run an idempotent response-returning operation with the default response policy and explicit
+ * [random] source.
+ */
 suspend fun retryingIdempotentHttpResponseCall(
     random: Random,
     block: suspend () -> HttpResponse,
 ): HttpResponse = retryingIdempotentHttpResponseCall(httpIdempotentResponseDefaultPolicy(), random, block)
 
+/**
+ * Run an idempotent response-returning operation with explicit response [policy] and [random] source.
+ */
 suspend fun retryingIdempotentHttpResponseCall(
     policy: RetryPolicy<HttpResponse>,
     random: Random,
@@ -845,12 +937,19 @@ suspend fun <T> retryingIdempotentHttpResponseBodyCall(
     transform: suspend (HttpResponse) -> T,
 ): T = retryingIdempotentHttpResponseBodyCall(policy, Random.Default, request, transform)
 
+/**
+ * Run an idempotent response-body operation with the default response policy and explicit [random]
+ * source.
+ */
 suspend fun <T> retryingIdempotentHttpResponseBodyCall(
     random: Random,
     request: suspend () -> HttpResponse,
     transform: suspend (HttpResponse) -> T,
 ): T = retryingIdempotentHttpResponseBodyCall(httpIdempotentResponseDefaultPolicy(), random, request, transform)
 
+/**
+ * Run an idempotent response-body operation with explicit response [policy] and [random] source.
+ */
 suspend fun <T> retryingIdempotentHttpResponseBodyCall(
     policy: RetryPolicy<HttpResponse>,
     random: Random,
