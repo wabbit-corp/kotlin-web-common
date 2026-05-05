@@ -11,15 +11,15 @@ import kotlin.time.Duration.Companion.seconds
 /**
  * Per-request timeout values.
  *
- * `null` leaves the corresponding timeout unset.
- * Positive values must be finite whole-millisecond durations.
+ * `null` leaves the corresponding timeout unset. Positive values must be finite whole-millisecond
+ * durations.
  *
- * These values are applied through Ktor's `HttpTimeout` request configuration and only take
- * effect when that plugin and the current engine support the corresponding timeout type. The
- * default `socket` timeout is tuned for request/response APIs and may be too aggressive for
- * streaming, SSE, or long-polling workloads because it measures inactivity between packets. Use
- * [forStreaming] when you want to preserve the base connect timeout, disable the request timeout,
- * and ensure a longer socket stall timeout for streaming responses.
+ * These values are applied through Ktor's `HttpTimeout` request configuration and only take effect
+ * when that plugin and the current engine support the corresponding timeout type. The default
+ * `socket` timeout is tuned for request/response APIs and may be too aggressive for streaming, SSE,
+ * or long-polling workloads because it measures inactivity between packets. Use [forStreaming] when
+ * you want to preserve the base connect timeout, disable the request timeout, and ensure a longer
+ * socket stall timeout for streaming responses.
  */
 data class Timeouts(
     /** Overall request timeout, or null to leave it unset. */
@@ -36,9 +36,7 @@ data class Timeouts(
     }
 }
 
-/**
- * Default socket inactivity timeout used by [forStreaming].
- */
+/** Default socket inactivity timeout used by [forStreaming]. */
 val DefaultStreamingSocketTimeout: Duration = 60.seconds
 
 /**
@@ -63,7 +61,9 @@ fun HttpRequestBuilder.applyTimeouts(t: Timeouts) {
  * - preserves the connect timeout
  * - preserves a larger existing socket timeout, or raises it to [minimumSocketTimeout]
  */
-fun Timeouts.forStreaming(minimumSocketTimeout: Duration = DefaultStreamingSocketTimeout): Timeouts {
+fun Timeouts.forStreaming(
+    minimumSocketTimeout: Duration = DefaultStreamingSocketTimeout
+): Timeouts {
     validateTimeout("minimumSocketTimeout", minimumSocketTimeout)
     val streamingSocketTimeout =
         when {

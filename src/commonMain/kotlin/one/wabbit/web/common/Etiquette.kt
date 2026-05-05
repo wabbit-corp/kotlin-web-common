@@ -17,7 +17,8 @@ import io.ktor.http.headers
  * @property extraHeaders additional validated headers to set on each request.
  */
 @ConsistentCopyVisibility
-data class Etiquette private constructor(
+data class Etiquette
+private constructor(
     val userAgent: String,
     val referer: String? = null,
     val extraHeaders: Map<String, String> = emptyMap(),
@@ -54,9 +55,7 @@ data class Etiquette private constructor(
     }
 }
 
-/**
- * Applies [etiquette] headers to this Ktor request builder.
- */
+/** Applies [etiquette] headers to this Ktor request builder. */
 fun HttpRequestBuilder.applyEtiquette(etiquette: Etiquette) {
     headers {
         set(HttpHeaders.UserAgent, etiquette.userAgent)

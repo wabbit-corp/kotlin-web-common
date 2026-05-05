@@ -4,16 +4,23 @@
 
 package one.wabbit.web.common
 
+import io.ktor.client.network.sockets.ConnectTimeoutException
+import io.ktor.client.network.sockets.SocketTimeoutException
 import io.ktor.client.plugins.ClientRequestException
 import io.ktor.client.plugins.HttpRequestTimeoutException
 import io.ktor.client.plugins.RedirectResponseException
 import io.ktor.client.plugins.ServerResponseException
-import io.ktor.client.network.sockets.ConnectTimeoutException
-import io.ktor.client.network.sockets.SocketTimeoutException
 import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.discardRemaining
 import io.ktor.http.Headers
 import io.ktor.http.HttpHeaders
+import kotlin.coroutines.cancellation.CancellationException
+import kotlin.random.Random
+import kotlin.time.Clock
+import kotlin.time.Duration
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Duration.Companion.seconds
+import kotlin.time.ExperimentalTime
 import kotlinx.datetime.DateTimeUnit
 import kotlinx.datetime.DayOfWeek
 import kotlinx.datetime.LocalDate
@@ -22,15 +29,8 @@ import kotlinx.datetime.TimeZone
 import kotlinx.datetime.plus
 import kotlinx.datetime.toInstant
 import kotlinx.datetime.toLocalDateTime
-import kotlin.coroutines.cancellation.CancellationException
-import kotlinx.serialization.Serializable
 import kotlinx.io.IOException
-import kotlin.random.Random
-import kotlin.time.Clock
-import kotlin.time.Duration
-import kotlin.time.Duration.Companion.milliseconds
-import kotlin.time.Duration.Companion.seconds
-import kotlin.time.ExperimentalTime
+import kotlinx.serialization.Serializable
 
 /**
  * Declarative finite or infinite sequence of retry delays.
@@ -46,33 +46,28 @@ sealed interface Schedule {
     /** Emit no retry delays. */
     @Serializable data object Never : Schedule
 
-    /**
-     * Repeat a fixed interval forever.
-     */
-    @Serializable data class Forever(val interval: Duration) : Schedule {
+    /** Repeat a fixed interval forever. */
+    @Serializable
+    data class Forever(val interval: Duration) : Schedule {
         init {
             requireFiniteNonNegativeDuration("interval", interval)
         }
     }
 
-    /**
-     * Repeat a fixed interval [times] times (e.g. "retry at most times times").
-     */
-    @Serializable data class Recurs(val times: Int, val interval: Duration) : Schedule {
+    /** Repeat a fixed interval [times] times (e.g. "retry at most times times"). */
+    @Serializable
+    data class Recurs(val times: Int, val interval: Duration) : Schedule {
         init {
             require(times >= 0) { "times must be >= 0, was $times" }
             requireFiniteNonNegativeDuration("interval", interval)
         }
     }
 
-    /**
-     * Use the fixed sequence [delays]. When exhausted, stop.
-     */
+    /** Use the fixed sequence [delays]. When exhausted, stop. */
     @ConsistentCopyVisibility
-    @Serializable data class Fixed private constructor(
-        val delays: List<Duration>,
-        private val copied: Boolean = true,
-    ) : Schedule {
+    @Serializable
+    data class Fixed
+    private constructor(val delays: List<Duration>, private val copied: Boolean = true) : Schedule {
         constructor(delays: List<Duration>) : this(delays.toList(), true)
 
         init {
@@ -89,32 +84,27 @@ sealed interface Schedule {
      * [cutoff]). Callers that leave it unbounded should be aware that multiplying a finite
      * [Duration] by [factor] can eventually overflow the finite duration range.
      */
-    @Serializable data class Exponential(val initialDelay: Duration, val factor: Double) : Schedule {
+    @Serializable
+    data class Exponential(val initialDelay: Duration, val factor: Double) : Schedule {
         init {
             requireFiniteNonNegativeDuration("initialDelay", initialDelay)
             requireFinitePositiveDouble("factor", factor)
         }
     }
 
-    /**
-     * Continue while either schedule continues, using the minimum delay.
-     */
+    /** Continue while either schedule continues, using the minimum delay. */
     @Serializable data class Union(val a: Schedule, val b: Schedule) : Schedule
 
-    /**
-     * Continue only while both schedules continue, using the maximum delay.
-     */
+    /** Continue only while both schedules continue, using the maximum delay. */
     @Serializable data class Intersection(val a: Schedule, val b: Schedule) : Schedule
 
-    /**
-     * Run [a] until it finishes, then run [b].
-     */
+    /** Run [a] until it finishes, then run [b]. */
     @Serializable data class Sequence(val a: Schedule, val b: Schedule) : Schedule
 
-    /**
-     * Apply multiplicative jitter in [minScaler, maxScaler] to delays.
-     */
-    @Serializable data class Jittered(val schedule: Schedule, val minScaler: Double, val maxScaler: Double) : Schedule {
+    /** Apply multiplicative jitter in [minScaler, maxScaler] to delays. */
+    @Serializable
+    data class Jittered(val schedule: Schedule, val minScaler: Double, val maxScaler: Double) :
+        Schedule {
         init {
             require(minScaler.isFinite()) { "minScaler must be finite, was $minScaler" }
             require(maxScaler.isFinite()) { "maxScaler must be finite, was $maxScaler" }
@@ -130,16 +120,16 @@ sealed interface Schedule {
      *
      * This is based on the sum of emitted delays, not wall-clock elapsed time.
      */
-    @Serializable data class WithCutoff(val schedule: Schedule, val duration: Duration) : Schedule {
+    @Serializable
+    data class WithCutoff(val schedule: Schedule, val duration: Duration) : Schedule {
         init {
             requireFiniteNonNegativeDuration("duration", duration)
         }
     }
 
-    /**
-     * Clamp each delay emitted by [schedule] to at most [maxDelay].
-     */
-    @Serializable data class CapDelay(val schedule: Schedule, val maxDelay: Duration) : Schedule {
+    /** Clamp each delay emitted by [schedule] to at most [maxDelay]. */
+    @Serializable
+    data class CapDelay(val schedule: Schedule, val maxDelay: Duration) : Schedule {
         init {
             requireFiniteNonNegativeDuration("maxDelay", maxDelay)
         }
@@ -155,31 +145,24 @@ sealed interface Schedule {
             jitterFactor == 0.0 -> this
             jitterFactor !in 0.0..1.0 ->
                 throw IllegalArgumentException("jitterFactor must be in [0,1], was $jitterFactor")
-            else -> Jittered(
-                schedule = this,
-                minScaler = 1.0 - jitterFactor,
-                maxScaler = 1.0 + jitterFactor,
-            )
+            else ->
+                Jittered(
+                    schedule = this,
+                    minScaler = 1.0 - jitterFactor,
+                    maxScaler = 1.0 + jitterFactor,
+                )
         }
 
-    /**
-     * Take at most [n] elements from this schedule.
-     */
+    /** Take at most [n] elements from this schedule. */
     fun limited(n: Int): Schedule =
         if (n <= 0) Schedule.Never
         else Schedule.Intersection(this, Schedule.Recurs(times = n, interval = Duration.ZERO))
 
-    /**
-     * Per-step cap.
-     */
-    fun capped(maxDelay: Duration): Schedule =
-        Schedule.CapDelay(this, maxDelay)
+    /** Per-step cap. */
+    fun capped(maxDelay: Duration): Schedule = Schedule.CapDelay(this, maxDelay)
 
-    /**
-     * Stop once cumulative scheduled delay would exceed [duration].
-     */
-    fun cutoff(duration: Duration): Schedule =
-        Schedule.WithCutoff(this, duration)
+    /** Stop once cumulative scheduled delay would exceed [duration]. */
+    fun cutoff(duration: Duration): Schedule = Schedule.WithCutoff(this, duration)
 
     /** Factory methods for common retry schedules. */
     companion object {
@@ -208,16 +191,12 @@ sealed interface Schedule {
         }
 
         /** Repeats [spaced] forever. */
-        fun forever(spaced: Duration): Schedule =
-            Schedule.Forever(spaced)
+        fun forever(spaced: Duration): Schedule = Schedule.Forever(spaced)
 
         /** Emits [times] retry delays, each equal to [delay]. */
-        fun fixed(delay: Duration, times: Int): Schedule =
-            Schedule.Recurs(times, delay)
+        fun fixed(delay: Duration, times: Int): Schedule = Schedule.Recurs(times, delay)
 
-        /**
-         * Exponential retry schedule with optional retry limit, delay cap, and jitter.
-         */
+        /** Exponential retry schedule with optional retry limit, delay cap, and jitter. */
         fun exponential(
             base: Duration,
             factor: Double = 2.0,
@@ -236,8 +215,8 @@ sealed interface Schedule {
 }
 
 /**
- * One "run" of a schedule. Each call returns the next delay, or null when finished.
- * Not thread-safe; assume you create one per retry loop.
+ * One "run" of a schedule. Each call returns the next delay, or null when finished. Not
+ * thread-safe; assume you create one per retry loop.
  */
 fun interface StatefulSchedule {
     /** Returns the next delay, or null when the schedule is exhausted. */
@@ -249,133 +228,122 @@ fun interface StatefulSchedule {
  *
  * The [random] source is used only by [Schedule.Jittered] nodes.
  */
-fun Schedule.compile(
-    random: Random = Random.Default,
-): StatefulSchedule = when (this) {
-    Schedule.Now -> {
-        var used = false
-        StatefulSchedule {
-            if (!used) {
-                used = true
-                Duration.ZERO
-            } else {
-                null
+fun Schedule.compile(random: Random = Random.Default): StatefulSchedule =
+    when (this) {
+        Schedule.Now -> {
+            var used = false
+            StatefulSchedule {
+                if (!used) {
+                    used = true
+                    Duration.ZERO
+                } else {
+                    null
+                }
             }
         }
-    }
 
-    Schedule.Never -> StatefulSchedule {
-        null
-    }
+        Schedule.Never -> StatefulSchedule { null }
 
-    is Schedule.Forever -> StatefulSchedule {
-        interval
-    }
+        is Schedule.Forever -> StatefulSchedule { interval }
 
-    is Schedule.Recurs -> {
-        var remaining = times
-        StatefulSchedule {
-            if (remaining <= 0) null
-            else {
-                remaining--
-                interval
+        is Schedule.Recurs -> {
+            var remaining = times
+            StatefulSchedule {
+                if (remaining <= 0) null
+                else {
+                    remaining--
+                    interval
+                }
             }
         }
-    }
 
-    is Schedule.Fixed -> {
-        val it = delays.iterator()
-        StatefulSchedule {
-            if (it.hasNext()) it.next() else null
+        is Schedule.Fixed -> {
+            val it = delays.iterator()
+            StatefulSchedule { if (it.hasNext()) it.next() else null }
         }
-    }
 
-    is Schedule.Exponential -> {
-        require(factor > 0) { "factor must be > 0, was $factor" }
-        var current = initialDelay
-        StatefulSchedule {
-            val d = current
-            current *= factor
-            d
-        }
-    }
-
-    is Schedule.Union -> {
-        val fa = a.compile(random)
-        val fb = b.compile(random)
-        StatefulSchedule {
-            val da = fa.next()
-            val db = fb.next()
-            if (da == null && db == null) null
-            else listOfNotNull(da, db).min()
-        }
-    }
-
-    is Schedule.Intersection -> {
-        val fa = a.compile(random)
-        val fb = b.compile(random)
-        StatefulSchedule {
-            val da = fa.next()
-            val db = fb.next()
-            if (da == null || db == null) null
-            else maxOf(da, db)
-        }
-    }
-
-    is Schedule.Sequence -> {
-        var current: StatefulSchedule = a.compile(random)
-        var onFirst = true
-
-        StatefulSchedule {
-            val d = current.next()
-            if (d != null) {
+        is Schedule.Exponential -> {
+            require(factor > 0) { "factor must be > 0, was $factor" }
+            var current = initialDelay
+            StatefulSchedule {
+                val d = current
+                current *= factor
                 d
-            } else if (onFirst) {
-                onFirst = false
-                current = b.compile(random)
-                current.next()
-            } else {
-                null
+            }
+        }
+
+        is Schedule.Union -> {
+            val fa = a.compile(random)
+            val fb = b.compile(random)
+            StatefulSchedule {
+                val da = fa.next()
+                val db = fb.next()
+                if (da == null && db == null) null else listOfNotNull(da, db).min()
+            }
+        }
+
+        is Schedule.Intersection -> {
+            val fa = a.compile(random)
+            val fb = b.compile(random)
+            StatefulSchedule {
+                val da = fa.next()
+                val db = fb.next()
+                if (da == null || db == null) null else maxOf(da, db)
+            }
+        }
+
+        is Schedule.Sequence -> {
+            var current: StatefulSchedule = a.compile(random)
+            var onFirst = true
+
+            StatefulSchedule {
+                val d = current.next()
+                if (d != null) {
+                    d
+                } else if (onFirst) {
+                    onFirst = false
+                    current = b.compile(random)
+                    current.next()
+                } else {
+                    null
+                }
+            }
+        }
+
+        is Schedule.Jittered -> {
+            val inner = schedule.compile(random)
+            StatefulSchedule {
+                val base = inner.next() ?: return@StatefulSchedule null
+                val scale =
+                    if (minScaler == maxScaler) minScaler
+                    else random.nextDouble(minScaler, maxScaler)
+                base * scale
+            }
+        }
+
+        is Schedule.WithCutoff -> {
+            val inner = schedule.compile(random)
+            var used: Duration = Duration.ZERO
+            StatefulSchedule {
+                val next = inner.next() ?: return@StatefulSchedule null
+                if (used + next > duration) null
+                else {
+                    used += next
+                    next
+                }
+            }
+        }
+
+        is Schedule.CapDelay -> {
+            val inner = schedule.compile(random)
+            StatefulSchedule {
+                val d = inner.next() ?: return@StatefulSchedule null
+                if (d > maxDelay) maxDelay else d
             }
         }
     }
 
-    is Schedule.Jittered -> {
-        val inner = schedule.compile(random)
-        StatefulSchedule {
-            val base = inner.next() ?: return@StatefulSchedule null
-            val scale =
-                if (minScaler == maxScaler) minScaler
-                else random.nextDouble(minScaler, maxScaler)
-            base * scale
-        }
-    }
-
-    is Schedule.WithCutoff -> {
-        val inner = schedule.compile(random)
-        var used: Duration = Duration.ZERO
-        StatefulSchedule {
-            val next = inner.next() ?: return@StatefulSchedule null
-            if (used + next > duration) null
-            else {
-                used += next
-                next
-            }
-        }
-    }
-
-    is Schedule.CapDelay -> {
-        val inner = schedule.compile(random)
-        StatefulSchedule {
-            val d = inner.next() ?: return@StatefulSchedule null
-            if (d > maxDelay) maxDelay else d
-        }
-    }
-}
-
-/**
- * Classification result for one retryable error or response.
- */
+/** Classification result for one retryable error or response. */
 sealed interface RetryAction {
     /** Do not retry. */
     data object Stop : RetryAction
@@ -415,9 +383,7 @@ class RetryPolicy<E>(
         RetryRun(schedule.compile(random), classify)
 }
 
-/**
- * Mutable state for one execution of a [RetryPolicy].
- */
+/** Mutable state for one execution of a [RetryPolicy]. */
 class RetryRun<E>(
     private val stateful: StatefulSchedule,
     private val classify: (E, Int) -> RetryAction,
@@ -453,9 +419,7 @@ suspend inline fun <T, reified E : Throwable> runWithRetry(
     block: suspend () -> T,
 ): T = runWithRetry(policy, Random.Default, block)
 
-/**
- * Runs [block] with retry support using [random] for jittered schedules.
- */
+/** Runs [block] with retry support using [random] for jittered schedules. */
 suspend inline fun <T, reified E : Throwable> runWithRetry(
     policy: RetryPolicy<E>,
     random: Random,
@@ -478,12 +442,15 @@ suspend inline fun <T, reified E : Throwable> runWithRetry(
  * Parse the value of a Retry-After header into a delay Duration.
  *
  * Supports:
- *  - delta-seconds (integer or float)
- *  - HTTP-date in IMF-fixdate, obsolete RFC 850, and ANSI C asctime() formats
+ * - delta-seconds (integer or float)
+ * - HTTP-date in IMF-fixdate, obsolete RFC 850, and ANSI C asctime() formats
  *
  * Returns null if the value is missing, invalid, or represents a time in the past.
  */
-fun parseRetryAfterHeader(headerValue: String?, now: kotlin.time.Instant = Clock.System.now()): Duration? {
+fun parseRetryAfterHeader(
+    headerValue: String?,
+    now: kotlin.time.Instant = Clock.System.now(),
+): Duration? {
     if (headerValue == null) return null
     val trimmed = headerValue.trim()
 
@@ -502,9 +469,7 @@ fun parseRetryAfterHeader(headerValue: String?, now: kotlin.time.Instant = Clock
 }
 
 private fun parseHttpDate(value: String, now: kotlin.time.Instant): kotlin.time.Instant? =
-    parseImfFixdate(value)
-        ?: parseRfc850Date(value, now)
-        ?: parseAsctimeDate(value)
+    parseImfFixdate(value) ?: parseRfc850Date(value, now) ?: parseAsctimeDate(value)
 
 private fun parseImfFixdate(value: String): kotlin.time.Instant? {
     val commaIndex = value.indexOf(',')
@@ -584,21 +549,22 @@ private fun appearsMoreThanFiftyYearsInFuture(
         candidate > now.plus(50, DateTimeUnit.YEAR, TimeZone.UTC)
     } ?: false
 
-private fun parseHttpMonth(value: String): Int? = when (value.lowercase()) {
-    "jan" -> 1
-    "feb" -> 2
-    "mar" -> 3
-    "apr" -> 4
-    "may" -> 5
-    "jun" -> 6
-    "jul" -> 7
-    "aug" -> 8
-    "sep" -> 9
-    "oct" -> 10
-    "nov" -> 11
-    "dec" -> 12
-    else  -> null
-}
+private fun parseHttpMonth(value: String): Int? =
+    when (value.lowercase()) {
+        "jan" -> 1
+        "feb" -> 2
+        "mar" -> 3
+        "apr" -> 4
+        "may" -> 5
+        "jun" -> 6
+        "jul" -> 7
+        "aug" -> 8
+        "sep" -> 9
+        "oct" -> 10
+        "nov" -> 11
+        "dec" -> 12
+        else -> null
+    }
 
 private fun parseHttpTime(value: String): ParsedTime? {
     val timeParts = value.split(':')
@@ -621,51 +587,48 @@ private fun toInstantOrNull(
     day: Int,
     time: ParsedTime,
     dayOfWeek: DayOfWeek? = null,
-): kotlin.time.Instant? = try {
-    if (year < 1900) return null
-    val localDate = LocalDate(year, month, day)
-    if (dayOfWeek != null && localDate.dayOfWeek != dayOfWeek) return null
-    val baseInstant =
-        LocalDateTime(year, month, day, time.hour, time.minute, time.second.coerceAtMost(59))
-            .toInstant(TimeZone.UTC)
-    if (time.second == 60) baseInstant + 1.seconds else baseInstant
-} catch (_: IllegalArgumentException) {
-    null
-}
+): kotlin.time.Instant? =
+    try {
+        if (year < 1900) return null
+        val localDate = LocalDate(year, month, day)
+        if (dayOfWeek != null && localDate.dayOfWeek != dayOfWeek) return null
+        val baseInstant =
+            LocalDateTime(year, month, day, time.hour, time.minute, time.second.coerceAtMost(59))
+                .toInstant(TimeZone.UTC)
+        if (time.second == 60) baseInstant + 1.seconds else baseInstant
+    } catch (_: IllegalArgumentException) {
+        null
+    }
 
-private fun parseShortDayName(value: String): DayOfWeek? =
-    shortDayNames[value]
+private fun parseShortDayName(value: String): DayOfWeek? = shortDayNames[value]
 
-private fun parseLongDayName(value: String): DayOfWeek? =
-    longDayNames[value]
+private fun parseLongDayName(value: String): DayOfWeek? = longDayNames[value]
 
-private data class ParsedTime(
-    val hour: Int,
-    val minute: Int,
-    val second: Int,
-)
+private data class ParsedTime(val hour: Int, val minute: Int, val second: Int)
 
 private val httpDateWhitespace = Regex("\\s+")
 
-private val shortDayNames = mapOf(
-    "Mon" to DayOfWeek.MONDAY,
-    "Tue" to DayOfWeek.TUESDAY,
-    "Wed" to DayOfWeek.WEDNESDAY,
-    "Thu" to DayOfWeek.THURSDAY,
-    "Fri" to DayOfWeek.FRIDAY,
-    "Sat" to DayOfWeek.SATURDAY,
-    "Sun" to DayOfWeek.SUNDAY,
-)
+private val shortDayNames =
+    mapOf(
+        "Mon" to DayOfWeek.MONDAY,
+        "Tue" to DayOfWeek.TUESDAY,
+        "Wed" to DayOfWeek.WEDNESDAY,
+        "Thu" to DayOfWeek.THURSDAY,
+        "Fri" to DayOfWeek.FRIDAY,
+        "Sat" to DayOfWeek.SATURDAY,
+        "Sun" to DayOfWeek.SUNDAY,
+    )
 
-private val longDayNames = mapOf(
-    "Monday" to DayOfWeek.MONDAY,
-    "Tuesday" to DayOfWeek.TUESDAY,
-    "Wednesday" to DayOfWeek.WEDNESDAY,
-    "Thursday" to DayOfWeek.THURSDAY,
-    "Friday" to DayOfWeek.FRIDAY,
-    "Saturday" to DayOfWeek.SATURDAY,
-    "Sunday" to DayOfWeek.SUNDAY,
-)
+private val longDayNames =
+    mapOf(
+        "Monday" to DayOfWeek.MONDAY,
+        "Tuesday" to DayOfWeek.TUESDAY,
+        "Wednesday" to DayOfWeek.WEDNESDAY,
+        "Thursday" to DayOfWeek.THURSDAY,
+        "Friday" to DayOfWeek.FRIDAY,
+        "Saturday" to DayOfWeek.SATURDAY,
+        "Sunday" to DayOfWeek.SUNDAY,
+    )
 
 /**
  * Configures how idempotent HTTP retries are classified.
@@ -682,7 +645,8 @@ private val longDayNames = mapOf(
  * @property maxRetryAfterDelay optional cap for `Retry-After` delays.
  */
 @ConsistentCopyVisibility
-data class HttpRetryOptions private constructor(
+data class HttpRetryOptions
+private constructor(
     val schedule: Schedule,
     val retryOnGenericIoException: Boolean,
     val retryableStatuses: Set<Int>,
@@ -759,9 +723,9 @@ data class HttpRetryOptions private constructor(
  * narrower custom policy instead of relying on this default.
  *
  * Status-based retries only apply when the wrapped HTTP call throws a Ktor response exception,
- * which usually means `expectSuccess = true` or an installed response validator. Calls that
- * return a normal [io.ktor.client.statement.HttpResponse] for retryable statuses will not be
- * retried by this policy unless the caller converts those statuses into exceptions. If
+ * which usually means `expectSuccess = true` or an installed response validator. Calls that return
+ * a normal [io.ktor.client.statement.HttpResponse] for retryable statuses will not be retried by
+ * this policy unless the caller converts those statuses into exceptions. If
  * [HttpRetryOptions.retryableStatuses] includes redirect codes, this policy also classifies
  * [RedirectResponseException].
  */
@@ -773,18 +737,31 @@ fun httpThrowableRetryPolicy(options: HttpRetryOptions): RetryPolicy<Throwable> 
             is ConnectTimeoutException,
             is SocketTimeoutException -> RetryAction.Retry()
 
-            is IOException -> if (options.retryOnGenericIoException) RetryAction.Retry() else RetryAction.Stop
+            is IOException ->
+                if (options.retryOnGenericIoException) RetryAction.Retry() else RetryAction.Stop
 
             is ServerResponseException -> {
-                classifyHttpRetryFromStatus(error.response.status.value, error.response.headers, options)
+                classifyHttpRetryFromStatus(
+                    error.response.status.value,
+                    error.response.headers,
+                    options,
+                )
             }
 
             is RedirectResponseException -> {
-                classifyHttpRetryFromStatus(error.response.status.value, error.response.headers, options)
+                classifyHttpRetryFromStatus(
+                    error.response.status.value,
+                    error.response.headers,
+                    options,
+                )
             }
 
             is ClientRequestException -> {
-                classifyHttpRetryFromStatus(error.response.status.value, error.response.headers, options)
+                classifyHttpRetryFromStatus(
+                    error.response.status.value,
+                    error.response.headers,
+                    options,
+                )
             }
 
             else -> RetryAction.Stop
@@ -798,9 +775,8 @@ fun httpThrowableRetryPolicy(options: HttpRetryOptions): RetryPolicy<Throwable> 
  * generic [IOException].
  */
 fun httpBroadIdempotentPolicy(
-    options: HttpRetryOptions = HttpRetryOptions.broadIdempotent(),
-): RetryPolicy<Throwable> =
-    httpThrowableRetryPolicy(options)
+    options: HttpRetryOptions = HttpRetryOptions.broadIdempotent()
+): RetryPolicy<Throwable> = httpThrowableRetryPolicy(options)
 
 /**
  * Narrower preset for failures that are usually transient across HTTP clients and intermediaries.
@@ -809,48 +785,36 @@ fun httpBroadIdempotentPolicy(
  * [IOException] and not the entire `5xx` range.
  */
 fun httpStrictTransientPolicy(
-    options: HttpRetryOptions = HttpRetryOptions.strictTransient(),
-): RetryPolicy<Throwable> =
-    httpThrowableRetryPolicy(options)
+    options: HttpRetryOptions = HttpRetryOptions.strictTransient()
+): RetryPolicy<Throwable> = httpThrowableRetryPolicy(options)
 
-/**
- * Historical default throwable policy for idempotent HTTP operations.
- */
-fun httpIdempotentDefaultPolicy(): RetryPolicy<Throwable> =
-    httpBroadIdempotentPolicy()
+/** Historical default throwable policy for idempotent HTTP operations. */
+fun httpIdempotentDefaultPolicy(): RetryPolicy<Throwable> = httpBroadIdempotentPolicy()
 
 /**
  * Default retry policy for idempotent HTTP calls that return [HttpResponse] objects directly.
  *
  * Unlike [httpIdempotentDefaultPolicy], this policy inspects [HttpResponse.status] instead of
- * relying on Ktor response exceptions. The broad default retries `408`, `429`, and `5xx`
- * responses, but callers may supply any retryable status set through [HttpRetryOptions]. When
- * enabled, `Retry-After` is honored for any configured retryable status.
+ * relying on Ktor response exceptions. The broad default retries `408`, `429`, and `5xx` responses,
+ * but callers may supply any retryable status set through [HttpRetryOptions]. When enabled,
+ * `Retry-After` is honored for any configured retryable status.
  */
 fun httpResponseRetryPolicy(options: HttpRetryOptions): RetryPolicy<HttpResponse> =
     RetryPolicy(options.schedule) { response, _ ->
         classifyHttpRetryFromStatus(response.status.value, response.headers, options)
     }
 
-/**
- * Broad idempotent retry policy for returned [HttpResponse] values.
- */
+/** Broad idempotent retry policy for returned [HttpResponse] values. */
 fun httpBroadIdempotentResponsePolicy(
-    options: HttpRetryOptions = HttpRetryOptions.broadIdempotent(),
-): RetryPolicy<HttpResponse> =
-    httpResponseRetryPolicy(options)
+    options: HttpRetryOptions = HttpRetryOptions.broadIdempotent()
+): RetryPolicy<HttpResponse> = httpResponseRetryPolicy(options)
 
-/**
- * Narrower transient retry policy for returned [HttpResponse] values.
- */
+/** Narrower transient retry policy for returned [HttpResponse] values. */
 fun httpStrictTransientResponsePolicy(
-    options: HttpRetryOptions = HttpRetryOptions.strictTransient(),
-): RetryPolicy<HttpResponse> =
-    httpResponseRetryPolicy(options)
+    options: HttpRetryOptions = HttpRetryOptions.strictTransient()
+): RetryPolicy<HttpResponse> = httpResponseRetryPolicy(options)
 
-/**
- * Historical default response policy for idempotent HTTP operations.
- */
+/** Historical default response policy for idempotent HTTP operations. */
 fun httpIdempotentResponseDefaultPolicy(): RetryPolicy<HttpResponse> =
     httpBroadIdempotentResponsePolicy()
 
@@ -870,14 +834,10 @@ suspend fun <T> retryingIdempotentHttpCall(
 /**
  * Run an idempotent HTTP operation with the default throwable policy and explicit [random] source.
  */
-suspend fun <T> retryingIdempotentHttpCall(
-    random: Random,
-    block: suspend () -> T,
-): T = retryingIdempotentHttpCall(httpIdempotentDefaultPolicy(), random, block)
+suspend fun <T> retryingIdempotentHttpCall(random: Random, block: suspend () -> T): T =
+    retryingIdempotentHttpCall(httpIdempotentDefaultPolicy(), random, block)
 
-/**
- * Run an idempotent HTTP operation with explicit throwable [policy] and [random] source.
- */
+/** Run an idempotent HTTP operation with explicit throwable [policy] and [random] source. */
 suspend fun <T> retryingIdempotentHttpCall(
     policy: RetryPolicy<Throwable>,
     random: Random,
@@ -903,10 +863,12 @@ suspend fun retryingIdempotentHttpResponseCall(
 suspend fun retryingIdempotentHttpResponseCall(
     random: Random,
     block: suspend () -> HttpResponse,
-): HttpResponse = retryingIdempotentHttpResponseCall(httpIdempotentResponseDefaultPolicy(), random, block)
+): HttpResponse =
+    retryingIdempotentHttpResponseCall(httpIdempotentResponseDefaultPolicy(), random, block)
 
 /**
- * Run an idempotent response-returning operation with explicit response [policy] and [random] source.
+ * Run an idempotent response-returning operation with explicit response [policy] and [random]
+ * source.
  */
 suspend fun retryingIdempotentHttpResponseCall(
     policy: RetryPolicy<HttpResponse>,
@@ -923,8 +885,8 @@ suspend fun retryingIdempotentHttpResponseCall(
 }
 
 /**
- * Run an idempotent HTTP operation with response-status-based retry support and transform the
- * final response into a caller-defined result.
+ * Run an idempotent HTTP operation with response-status-based retry support and transform the final
+ * response into a caller-defined result.
  *
  * This helper retries based on [HttpResponse.status] exactly like
  * [retryingIdempotentHttpResponseCall], but hides the intermediate [HttpResponse] from the caller
@@ -945,7 +907,13 @@ suspend fun <T> retryingIdempotentHttpResponseBodyCall(
     random: Random,
     request: suspend () -> HttpResponse,
     transform: suspend (HttpResponse) -> T,
-): T = retryingIdempotentHttpResponseBodyCall(httpIdempotentResponseDefaultPolicy(), random, request, transform)
+): T =
+    retryingIdempotentHttpResponseBodyCall(
+        httpIdempotentResponseDefaultPolicy(),
+        random,
+        request,
+        transform,
+    )
 
 /**
  * Run an idempotent response-body operation with explicit response [policy] and [random] source.
@@ -955,8 +923,7 @@ suspend fun <T> retryingIdempotentHttpResponseBodyCall(
     random: Random,
     request: suspend () -> HttpResponse,
     transform: suspend (HttpResponse) -> T,
-): T =
-    transform(retryingIdempotentHttpResponseCall(policy, random, request))
+): T = transform(retryingIdempotentHttpResponseCall(policy, random, request))
 
 private fun requireFiniteNonNegativeDuration(name: String, duration: Duration) {
     require(duration.isFinite()) { "$name must be finite, was $duration" }
@@ -983,7 +950,8 @@ private fun classifyHttpRetryFromStatus(
 ): RetryAction =
     if (status in options.retryableStatuses) {
         val retryAfter =
-            if (options.respectRetryAfter) parseRetryAfterHeader(headers[HttpHeaders.RetryAfter]) else null
+            if (options.respectRetryAfter) parseRetryAfterHeader(headers[HttpHeaders.RetryAfter])
+            else null
         RetryAction.Retry(clampRetryAfterDelay(retryAfter, options.maxRetryAfterDelay))
     } else {
         RetryAction.Stop

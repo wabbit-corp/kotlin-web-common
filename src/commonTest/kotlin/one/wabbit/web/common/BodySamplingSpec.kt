@@ -12,14 +12,14 @@ import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.headersOf
-import kotlinx.coroutines.test.runTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertIs
 import kotlin.test.assertFalse
+import kotlin.test.assertIs
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
+import kotlinx.coroutines.test.runTest
 
 class BodySamplingSpec {
     @Test
@@ -31,7 +31,11 @@ class BodySamplingSpec {
                         addHandler {
                             respond(
                                 content = "abcdef",
-                                headers = headersOf(HttpHeaders.ContentType, ContentType.Text.Plain.toString()),
+                                headers =
+                                    headersOf(
+                                        HttpHeaders.ContentType,
+                                        ContentType.Text.Plain.toString(),
+                                    ),
                             )
                         }
                     }
@@ -59,7 +63,11 @@ class BodySamplingSpec {
                         addHandler {
                             respond(
                                 content = "abc",
-                                headers = headersOf(HttpHeaders.ContentType, ContentType.Text.Plain.toString()),
+                                headers =
+                                    headersOf(
+                                        HttpHeaders.ContentType,
+                                        ContentType.Text.Plain.toString(),
+                                    ),
                             )
                         }
                     }
@@ -87,7 +95,11 @@ class BodySamplingSpec {
                         addHandler {
                             respond(
                                 content = "abcdef",
-                                headers = headersOf(HttpHeaders.ContentType, ContentType.Text.Plain.toString()),
+                                headers =
+                                    headersOf(
+                                        HttpHeaders.ContentType,
+                                        ContentType.Text.Plain.toString(),
+                                    ),
                             )
                         }
                     }
@@ -112,7 +124,11 @@ class BodySamplingSpec {
                         addHandler {
                             respond(
                                 content = "abcdef",
-                                headers = headersOf(HttpHeaders.ContentType, ContentType.Text.Plain.toString()),
+                                headers =
+                                    headersOf(
+                                        HttpHeaders.ContentType,
+                                        ContentType.Text.Plain.toString(),
+                                    ),
                             )
                         }
                     }
@@ -139,7 +155,11 @@ class BodySamplingSpec {
                             respond(
                                 content = """{"error":"bad request"}""",
                                 status = HttpStatusCode.BadRequest,
-                                headers = headersOf(HttpHeaders.ContentType, ContentType.Application.Json.toString()),
+                                headers =
+                                    headersOf(
+                                        HttpHeaders.ContentType,
+                                        ContentType.Application.Json.toString(),
+                                    ),
                             )
                         }
                     }
@@ -148,7 +168,7 @@ class BodySamplingSpec {
             try {
                 val error =
                     assertIs<ResponseException>(
-                        runCatching { client.get("https://example.test") }.exceptionOrNull(),
+                        runCatching { client.get("https://example.test") }.exceptionOrNull()
                     )
                 val sample = error.responseBodySampleOrNull()
                 assertNotNull(sample)
@@ -229,7 +249,8 @@ class BodySamplingSpec {
                                 content = gzipAbc,
                                 headers =
                                     headersOf(
-                                        HttpHeaders.ContentType to listOf(ContentType.Text.Plain.toString()),
+                                        HttpHeaders.ContentType to
+                                            listOf(ContentType.Text.Plain.toString()),
                                         HttpHeaders.ContentEncoding to listOf("gzip"),
                                     ),
                             )

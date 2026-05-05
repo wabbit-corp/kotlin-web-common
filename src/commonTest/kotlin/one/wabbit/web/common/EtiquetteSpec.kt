@@ -14,10 +14,7 @@ class EtiquetteSpec {
     fun `reserved headers are rejected case insensitively`() {
         val userAgentError =
             assertFailsWith<IllegalArgumentException> {
-                Etiquette(
-                    userAgent = "agent",
-                    extraHeaders = mapOf("user-agent" to "other-agent"),
-                )
+                Etiquette(userAgent = "agent", extraHeaders = mapOf("user-agent" to "other-agent"))
             }
         assertEquals("extraHeaders must not contain User-Agent", userAgentError.message)
 

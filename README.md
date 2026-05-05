@@ -1,5 +1,12 @@
 # kotlin-web-common
 
+![](./.meta/github-project-banner.png)
+
+<p align=center>
+    <img src="https://img.shields.io/maven-central/v/one.wabbit/kotlin-web-common" alt="Maven Central">
+    <img src="https://img.shields.io/badge/Kotlin-Multiplatform-7F52FF" alt="Kotlin Multiplatform">
+</p>
+
 `kotlin-web-common` is a Kotlin Multiplatform support library for Ktor-based HTTP clients.
 It packages the pieces that tend to get reimplemented across small client wrappers:
 retry schedules, `Retry-After` parsing, per-request timeout helpers, request etiquette headers,
@@ -10,7 +17,7 @@ looking for a complete HTTP client by itself. It does not choose an engine for y
 hide Ktor. Instead, it gives you a small shared toolkit for the repetitive parts around Ktor
 requests.
 
-## Installation
+## 🚀 Installation
 
 ```kotlin
 repositories {
@@ -53,7 +60,7 @@ If you are targeting Apple platforms, use the appropriate Darwin engine instead 
 timeouts only take effect when that plugin is installed and when the selected Ktor engine supports
 the timeout type you are setting.
 
-## Quick Start
+## 🚀 Usage
 
 This is the smallest useful slice of the library: parsing `Retry-After` and compiling a retry
 schedule.
@@ -146,3 +153,15 @@ The release-notes source of truth for this repository is [`CHANGELOG.md`](./CHAN
 This library is maintained as shared infrastructure for the broader `kotlin-web-*` client family,
 so changes are driven by real client usage first and then documented here as the public surface
 stabilizes.
+
+## Licensing
+
+This project is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0) for open
+source use.
+
+For commercial use, contact Wabbit Consulting Corporation at `wabbit@wabbit.one`.
+
+## Contributing
+
+Contributions are governed by the repository contribution policy and the Wabbit CLA. See
+`CONTRIBUTING.md` and the files under `legal/`.
