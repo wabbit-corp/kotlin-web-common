@@ -1,0 +1,14 @@
+# Repo-local check suppressions for generated assets and intentional HTTP/test literals.
+check:ignore E_DUPLICATE_DIRECTORY_TREE src/main/kotlin/one/wabbit/web/common
+check:ignore E_DUPLICATE_FILE .banner.png
+check:ignore E_KMP_AMBIGUOUS_NATIVE_NAME .
+check:ignore E_KMP_REDUNDANT_TARGET_ALIAS .
+check:ignore E_HIGH_ENTROPY_STRING docs/api-reference.md
+check:ignore E_HIGH_ENTROPY_STRING README.md
+check:ignore E_HIGH_ENTROPY_STRING PLAN.md
+check:ignore E_STALE_TODO src/commonMain/kotlin/one/wabbit/web/common/Schedule.kt
+check:ignore E_HIGH_ENTROPY_STRING src/commonMain/kotlin/one/wabbit/web/common/BodySampling.kt
+check:ignore E_HARDCODED_URL src/commonTest/kotlin/one/wabbit/web/common/EtiquetteSpec.kt
+check:ignore E_HARDCODED_URL src/commonTest/kotlin/one/wabbit/web/common/BodySamplingSpec.kt
+check:ignore E_HIGH_ENTROPY_STRING src/commonTest/kotlin/one/wabbit/web/common/BodySamplingSpec.kt
+check:ignore E_HARDCODED_URL src/commonTest/kotlin/one/wabbit/web/common/HttpPolicySpec.kt
